@@ -22,7 +22,6 @@ from astropy import units as u
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_body, get_sun
 from astropy.time import Time
 from astropy.utils import iers
-from streamlit import config
 from streamlit.runtime import exists as _streamlit_running
 
 # Permet de lancer simplement `python app.py` (ou le bouton Run de PyCharm) :
@@ -103,7 +102,8 @@ def framing(major_arcmin) -> str:
     return "trop grand"
 
 
-st.set_page_config(page_title="Ciel visible — planificateur", page_icon="🔭", layout="wide")
+st.set_page_config(page_title="Ciel visible — planificateur", page_icon="🔭", layout="wide",
+                   initial_sidebar_state="auto")
 
 
 # --------------------------------------------------------------------------- #
@@ -189,7 +189,15 @@ STRIDE = 5  # le calcul est à la minute ; l'enchaînement du plan se décide to
 
 
 def _tmpl() -> str:
-    return "plotly_dark" if st.session_state.get("dark") else "plotly_white"
+    """Thème des graphiques = thème du navigateur de chaque utilisateur (suit le mode sombre du téléphone)."""
+    try:
+        return "plotly_dark" if st.context.theme.type == "dark" else "plotly_white"
+    except Exception:
+        return "plotly_white"
+
+
+# Graphiques tactiles : pas de zoom/déplacement qui bloque le défilement de la page, pas de barre d'outils
+PLOT_CFG = {"displayModeBar": False, "scrollZoom": False, "doubleClick": False}
 
 
 def _n(dt):
@@ -324,7 +332,7 @@ def compute_night(lat, lon, elev, tz_name, night, sun_limit, intervals, mag_limi
         rows.append({
             "idx": i, "Objet": r["label"], "Nom": r["common"], "Type": r["type_fr"], "code": r["Type"],
             "Const.": r["Const"], "Mag": r["mag"], "Taille (')": r["size"],
-            "Visible": f"{t_loc[s]:%H:%M} → {t_loc[e]:%H:%M}",
+            "Visible": f"{t_loc[s]:%H:%M} → {t_loc[e]:%H:%M}", "_s": int(s), "_e": int(e),
             "Durée (h)": round((e - s + 1) / 60, 2),
             "Meilleur": f"{t_loc[best]:%H:%M}",
             "Alt": round(float(alt[i, best]), 1), "Az": round(float(az[i, best]), 1),
@@ -342,7 +350,10 @@ def compute_night(lat, lon, elev, tz_name, night, sun_limit, intervals, mag_limi
 # Graphiques
 # --------------------------------------------------------------------------- #
 def _layout(fig, **kw):
-    fig.update_layout(template=_tmpl(), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", **kw)
+    fig.update_layout(template=_tmpl(), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                      dragmode=False, **kw)
+    fig.update_xaxes(fixedrange=True)
+    fig.update_yaxes(fixedrange=True)
     return fig
 
 
@@ -391,28 +402,31 @@ def polar_chart(intervals, data, k, top_n=25):
                                       textfont=dict(size=18), name="Lune",
                                       marker=dict(size=1, opacity=0)))
     return _layout(
-        fig, height=520, margin=dict(l=30, r=30, t=20, b=20), legend=dict(orientation="h", y=-0.05),
+        fig, height=440, margin=dict(l=24, r=24, t=10, b=10), legend=dict(orientation="h", y=-0.05),
         polar=dict(angularaxis=dict(direction="clockwise", rotation=90, tickmode="array",
                                     tickvals=[0, 90, 180, 270], ticktext=["N", "E", "S", "O"]),
                    radialaxis=dict(range=[0, 90], tickvals=[0, 30, 60, 90],
                                    ticktext=["90°", "60°", "30°", "0°"], angle=45)))
 
 
-def timeline_chart(data, top_ids):
-    sel = data["sel"]
+def timeline_chart(data, ids):
+    """Tous les objets `ids` (déjà triés chronologiquement), sur toute la durée de la nuit."""
+    sel, t_loc = data["sel"], data["t_loc"]
+    labels = [sel.loc[i, "label"] for i in ids]
     fig = go.Figure()
     _moon_bands(fig, data)
-    for i in top_ids:
-        label = sel.loc[i, "label"]
+    for i, label in zip(ids, labels):
         for a, b in data["intervals"][i]:
             fig.add_trace(go.Bar(
                 base=[_n(a)], x=[(b - a + timedelta(minutes=1)).total_seconds() * 1000],
                 y=[label], orientation="h", marker_color="#58a6ff",
                 hovertemplate=f"{label}<br>{a:%H:%M} → {b:%H:%M}<extra></extra>", showlegend=False))
     _now_line(fig, data)
-    return _layout(fig, xaxis=dict(type="date", tickformat="%H:%M"), yaxis=dict(autorange="reversed"),
-                   height=max(260, 24 * len(top_ids) + 80), margin=dict(l=10, r=10, t=10, b=30),
-                   barmode="overlay")
+    return _layout(fig, barmode="overlay", height=max(260, 22 * len(ids) + 80),
+                   margin=dict(l=10, r=10, t=10, b=30),
+                   xaxis=dict(type="date", tickformat="%H:%M",
+                              range=[_n(t_loc[0]), _n(t_loc[-1] + timedelta(minutes=1))]),
+                   yaxis=dict(categoryorder="array", categoryarray=labels, autorange="reversed"))
 
 
 # --------------------------------------------------------------------------- #
@@ -754,22 +768,8 @@ def build_message(plan: pd.DataFrame, ctx: dict, emoji: bool = True) -> str:
 
 
 # --------------------------------------------------------------------------- #
-# Réglages locaux (config.json) — mode sombre, contacts WhatsApp
+# Utilitaires d'affichage
 # --------------------------------------------------------------------------- #
-CFG_PATH = Path(__file__).parent / "config.json"
-
-
-def load_cfg() -> dict:
-    try:
-        return json.loads(CFG_PATH.read_text("utf-8"))
-    except Exception:
-        return {}
-
-
-def save_cfg(cfg: dict) -> None:
-    CFG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), "utf-8")
-
-
 def col_config(df: pd.DataFrame) -> dict:
     """Largeur de chaque colonne ajustée à son contenu (en pixels)."""
     out = {}
@@ -797,32 +797,35 @@ def send_cloud_api(token: str, phone_id: str, to: str, text: str, version: str =
 
 
 # --------------------------------------------------------------------------- #
-# Interface
+# Interface (pensée pour le téléphone : onglets, boutons larges, cartes)
 # --------------------------------------------------------------------------- #
-cfg = load_cfg()
+st.markdown("""<style>
+.block-container{padding-top:3.5rem}
+[data-testid^="stBaseLinkButton"],.stButton button,.stDownloadButton button{min-height:46px}
+@media (max-width:640px){
+  .block-container{padding:3.2rem 0.6rem 3rem}
+  h1{font-size:1.45rem!important} h2{font-size:1.25rem!important} h3{font-size:1.1rem!important}
+  button[role="tab"]{padding:0.5rem 0.65rem}
+  [data-testid="stMetricValue"]{font-size:1.2rem}
+}
+</style>""", unsafe_allow_html=True)
 
-# ----- Thème clair / sombre (appliqué via la config Streamlit puis rerun) ----
-if "dark" not in st.session_state:
+st.markdown("### 🔭 Ciel visible")
+header = st.container()  # rempli après le calcul (nuit, Lune, filtre)
+tab_sky, tab_obj, tab_plans, tab_share = st.tabs(["🌌 Ciel", "📋 Objets", "🗓️ Plans", "📲 Partage"])
+
+
+def _secret(key, default):
     try:
-        sys_dark = st.context.theme.type == "dark"
+        return st.secrets.get(key, default)
     except Exception:
-        sys_dark = False
-    st.session_state["dark"] = cfg["dark"] if cfg.get("dark") is not None else sys_dark
-_base = "dark" if st.session_state["dark"] else "light"
-if config.get_option("theme.base") != _base:
-    config.set_option("theme.base", _base)
-    st.rerun()
+        return default
 
-st.title("🔭 Ciel visible — planificateur de nuit")
-st.caption("Dessine ta zone de ciel dégagée (directions + altitudes) et obtiens un plan de nuit "
-           "séquencé : quel objet photographier, à quelle heure, dans quelle direction.")
 
+# =========================== ⚙️ RÉGLAGES (menu de gauche) ===================
 with st.sidebar:
-    if st.toggle("🌙 Mode sombre", key="dark") != cfg.get("dark"):
-        cfg["dark"] = st.session_state["dark"]
-        save_cfg(cfg)
-
-    st.header("Lieu & nuit")
+    st.markdown("## ⚙️ Réglages")
+    st.markdown("**📍 Lieu & nuit**")
     city = st.text_input("Ville", "Nanterre")
     try:
         places = geocode(city) if city.strip() else []
@@ -847,20 +850,20 @@ with st.sidebar:
                 lon = st.number_input("Longitude", -180.0, 180.0, float(lon), format="%.5f")
                 elev = st.number_input("Altitude (m)", 0, 5000, int(elev))
 
-    _now = datetime.now()  # heure du PC ; avant 6 h on est encore dans la nuit commencée la veille
+    # Nuit par défaut d'après l'heure du site (avant 6 h on est encore dans la nuit d'hier soir)
+    _now = datetime.now(ZoneInfo(tz_name)) if tz_name else datetime.now()
     night = st.date_input("Nuit du (soir)", _now.date() - timedelta(days=1) if _now.hour < 6 else _now.date())
-    twilight = st.selectbox("Début de nuit", ["Astronomique (−18°)", "Nautique (−12°)", "Civil (−6°)"])
+    twilight = st.radio("Début de nuit", ["Astronomique (−18°)", "Nautique (−12°)", "Civil (−6°)"], horizontal=True)
     sun_limit = {"A": -18.0, "N": -12.0, "C": -6.0}[twilight[0]]
     with st.expander("Précision du calcul"):
         temp_c = st.number_input("Température (°C)", -30, 40, 10,
-                                 help="Sert à la réfraction atmosphérique (effet de quelques minutes d'arc à 20°).")
+                                 help="Sert à la réfraction atmosphérique (quelques minutes d'arc à 20°).")
 
-    st.header("Ma zone de ciel dégagée")
-    dirs = st.multiselect("Directions visibles", SECTORS, default=DEFAULT_DIRS)
-    c1, c2 = st.columns(2)
-    amin = c1.number_input("Alt. min (°)", 0, 89, 20)
-    amax = c2.number_input("Alt. max (°)", 1, 90, 50)
-
+    st.divider()
+    st.markdown("**🧭 Ma zone de ciel dégagée**")
+    dirs = st.pills("Directions visibles", SECTORS, selection_mode="multi", default=DEFAULT_DIRS) or []
+    amin, amax = st.slider("Hauteur visible (°)", 0, 90, (20, 50),
+                           help="Altitude minimale (arbres, immeubles) et maximale (balcon, toit…).")
     table = pd.DataFrame({
         "Secteur": SECTORS, "Visible": [s_ in dirs for s_ in SECTORS],
         "Alt min": float(amin), "Alt max": float(amax),
@@ -870,7 +873,6 @@ with st.sidebar:
         table = st.data_editor(table, hide_index=True, width="stretch", disabled=["Secteur"],
                                key=f"tbl_{'-'.join(dirs)}_{amin}_{amax}")
     intervals = intervals_from_sectors(table)
-
     with st.expander("Mode précis : intervalles d'azimut en degrés"):
         st.caption("Nord = 0°, Est = 90°, Sud = 180°, Ouest = 270°. Ajoute autant de lignes que nécessaire.")
         use_prec = st.checkbox("Utiliser ces intervalles à la place des secteurs")
@@ -882,11 +884,12 @@ with st.sidebar:
             intervals = [tuple(float(v) for v in r) for r in clean.itertuples(index=False)
                          if float(r[2]) < float(r[3])]
 
-    st.header("Objets")
-    cats = st.multiselect("Catégories", list(CATEGORIES), default=["Nébuleuses"])
-    flt = st.selectbox("Filtre optique", FILTERS, index=2,
-                       help="Le Vespera n'a pas de changement de filtre en cours de nuit : "
-                            "choisis celui que tu as monté.")
+    st.divider()
+    st.markdown("**🔭 Objets**")
+    cats = st.pills("Catégories", list(CATEGORIES), selection_mode="multi", default=["Nébuleuses"]) or []
+    flt = st.radio("Filtre optique", FILTERS, index=2, horizontal=True,
+                   help="Le Vespera n'a pas de changement de filtre en cours de nuit : "
+                        "choisis celui que tu as monté.")
     hide_bad = st.checkbox("Masquer les objets déconseillés avec ce filtre", True)
     mag_limit = st.slider("Magnitude max", 5.0, 16.0, 11.0, 0.5)
     min_size = st.slider("Taille min (')", 0.5, 30.0, 3.0, 0.5)
@@ -895,18 +898,25 @@ with st.sidebar:
     with st.expander("Instrument : Vespera Pro 2 (source : vaonis.com)"):
         st.table(pd.Series(VESPERA, name="Valeur"))
 
-    st.header("Style de plan")
+    st.divider()
+    st.markdown("**🗓️ Plans**")
     style = st.radio("Durée par objet", list(PLAN_STYLES), index=0,
                      help="Poses longues : peu d'objets, beaucoup de temps de pose sur chacun.")
     n_plans = st.slider("Nombre de plans alternatifs", 1, 5, 3,
                         help="Chaque plan utilise des objets différents des plans précédents.")
+    view = st.radio("Affichage des plans", ["Cartes", "Tableau"], horizontal=True,
+                    help="Les cartes sont plus lisibles sur téléphone.")
+    st.caption("Le thème clair/sombre suit celui de ton appareil (menu ⋮ → Settings pour le changer).")
 
+# =========================== CALCULS ========================================
+if not cats:
+    st.info("Choisis au moins une catégorie d'objets dans ⚙️ Réglages.")
+    st.stop()
 if not intervals:
-    st.info("Choisis au moins une direction visible (ou un intervalle valide) dans la barre latérale.")
+    st.info("Choisis au moins une direction visible dans ⚙️ Réglages.")
     st.stop()
 
 mask_key = tuple(tuple(float(x) for x in iv) for iv in intervals)
-
 try:
     data = compute_night(lat, lon, elev, tz_name, night, sun_limit, mask_key,
                          mag_limit, min_size, tuple(cats), unrated, float(temp_c))
@@ -927,21 +937,8 @@ def _utc(dt):
 
 
 now_site = datetime.now(tzinfo)
-pc_off = datetime.now().astimezone().utcoffset()
 tz_label = f"{tz_name} · {_utc(t_loc[0])} ({t_loc[0].tzname()})"
-if data["used_limit"] != sun_limit:
-    st.warning(f"Pas de nuit {twilight.split(' ')[0].lower()} à cette date : "
-               f"j'utilise le Soleil à {data['used_limit']:.0f}° sous l'horizon.")
-st.write(f"**{p['name']}** · nuit de **{t_loc[0]:%H:%M}** à **{t_loc[-1]:%H:%M}** "
-         f"· Lune éclairée à **{data['illum'] * 100:.0f} %**"
-         f"{' (levée une partie de la nuit)' if (data['moon_alt'] > 0).any() else ' (couchée)'}")
-st.caption(f"🕒 Toutes les heures sont en heure locale du lieu : {tz_label} (changement d'heure géré). "
-           f"Il est {now_site:%H:%M} sur place. Positions apparentes (réfraction incluse), calcul à la minute.")
-if pc_off != now_site.utcoffset():
-    st.warning(f"Le fuseau de ce PC ({_utc(datetime.now().astimezone())}) diffère de celui du lieu "
-               f"({_utc(now_site)}) : les heures affichées suivent le lieu choisi.")
 
-# ----- Filtre optique + cadrage ---------------------------------------------
 res = data["res"].copy()
 if not res.empty:
     res["Filtre"] = res["code"].map(lambda c: filter_fit(c, flt))
@@ -953,13 +950,11 @@ if not res.empty:
     res = res.reset_index(drop=True)
     data["res"] = res
 if res.empty:
-    st.info("Aucun objet ne traverse ta zone avec ces filtres. Élargis la zone, la magnitude ou change de filtre.")
+    st.info("Aucun objet ne traverse ta zone avec ces filtres. Élargis la zone, la magnitude ou change de filtre "
+            "dans ⚙️ Réglages.")
     st.stop()
 
-# ----- Plans séquencés --------------------------------------------------------
-st.subheader("🗓️ Plans de nuit")
-
-# Calcul des plans mis en cache tant que les paramètres ne changent pas
+# Plans automatiques (mis en cache dans la session tant que les réglages ne changent pas)
 sig = (lat, lon, elev, tz_name, str(night), sun_limit, mask_key, tuple(cats), flt, hide_bad, no_mosaic,
        mag_limit, min_size, unrated, float(temp_c), style, n_plans)
 if st.session_state.get("_plans_sig") != sig:
@@ -982,189 +977,172 @@ def summarize(plan_df):
             "Parcours": " → ".join(plan_df["Objet"])}
 
 
+def plan_cards(plan_df):
+    """Un créneau = une carte compacte (lisible sans défilement horizontal)."""
+    for _, r in plan_df.iterrows():
+        mag = f" · mag {r['Mag']:.1f}" if pd.notna(r["Mag"]) else ""
+        with st.container(border=True):
+            st.markdown(f"**{r['Créneau']}** · {r['Durée']}  \n**{r['Objet']}** {r['Nom']} — {r['Type']}{mag}")
+            st.caption(f"↗ alt {r['Altitude']} · az {r['Azimut']} ({r['Dir']})  \n"
+                       f"🌙 {r['Lune']} · {r['Filtre']} · cadrage {r['Cadrage']} · visible {r['Visible de']}")
+
+
+def show_plan(plan_df, key):
+    if view == "Cartes":
+        plan_cards(plan_df)
+    else:
+        shown = plan_df.drop(columns=["_i", "_start", "_end"])
+        st.dataframe(shown, hide_index=True, width="stretch", column_config=col_config(shown))
+    st.plotly_chart(plan_chart(data, plan_df), width="stretch", theme=None, config=PLOT_CFG, key=key)
+
+
 plan_dfs = {}  # nom → tableau du plan (pour le partage)
 for pl in plans:
     pl["fine"] = refine_segments(data, res, pl["segs"])
     pl["df"] = plan_table(data, res, pl["fine"])
     plan_dfs[f"Plan {pl['name']}"] = pl["df"]
 
-if plans:
-    summ = pd.DataFrame([{"Plan": f"Plan {pl['name']}", **summarize(pl["df"])} for pl in plans])
-    st.dataframe(summ, hide_index=True, width="stretch", column_config=col_config(summ))
-    if plans[0]["style"] != style:
-        st.warning(f"Aucun créneau possible en « {style} » : plans calculés en « {plans[0]['style']} ».")
-    st.caption("Plans alternatifs : chacun utilise des objets différents. Un seul objet à la fois ; à chaque minute "
-               "l'objet est dans ta zone (10 min entre deux objets pour le pointage). Altitude et azimut = début → fin. "
-               "Barres pâles = fenêtre complète de visibilité ; Lune levée en jaune ; pointillés rouges = maintenant.")
-else:
-    st.info("Aucun objet ne reste assez longtemps dans ta zone pour former un créneau automatique. "
-            "Tu peux quand même composer ton plan dans l'onglet « Mon plan ».")
+with header:
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Nuit", f"{t_loc[0]:%H:%M} → {t_loc[-1]:%H:%M}")
+    m2.metric("Lune", f"{data['illum'] * 100:.0f} %",
+              "levée une partie de la nuit" if (data["moon_alt"] > 0).any() else "couchée", delta_color="off")
+    m3.metric("Filtre", flt.split(" (")[0])
+    st.caption(f"📍 {p['name']} · 🕒 heure locale : {tz_label}, il est {now_site:%H:%M} sur place · "
+               "positions apparentes (réfraction incluse), calcul à la minute.")
+    if data["used_limit"] != sun_limit:
+        st.warning(f"Pas de nuit {twilight.split(' ')[0].lower()} à cette date : "
+                   f"j'utilise le Soleil à {data['used_limit']:.0f}° sous l'horizon.")
 
-tabs = st.tabs([f"Plan {pl['name']}" for pl in plans] + ["✏️ Mon plan"])
-for tab, pl in zip(tabs, plans):
-    with tab:
-        shown = pl["df"].drop(columns=["_i", "_start", "_end"])
-        st.dataframe(shown, hide_index=True, width="stretch", column_config=col_config(shown))
-        st.plotly_chart(plan_chart(data, pl["df"]), width="stretch", theme=None, key=f"chart_{pl['name']}")
 
-# ----- Mon plan (créé / ajusté à la main) -------------------------------------
-with tabs[-1]:
-    st.markdown("Compose ton plan : choisis des objets, laisse l'appli proposer un enchaînement, "
-                "puis ajuste les heures. Chaque créneau est contrôlé (zone dégagée, chevauchement, pointage).")
-    st.session_state.setdefault("custom_ver", 0)
-    st.session_state.setdefault("custom_rows", pd.DataFrame({c: pd.Series([], dtype=str) for c in ("Objet", "Début", "Fin")}))
-    names = list(res["Objet"])
-
-    def _opt(i):
-        r = res.iloc[i]
-        mag = f"mag {r['Mag']:.1f}" if pd.notna(r["Mag"]) else "mag ?"
-        return f"{r['Objet']} {r['Nom']} · {mag} · visible {r['Visible']}".replace("  ", " ")
-
-    picked = st.multiselect("Objets que je veux observer", list(range(len(res))), format_func=_opt,
-                            key="custom_pick")
-    pc1, pc2 = st.columns(2)
-    min_pose = pc1.slider("Pose mini par objet (min)", 20, 240, 60, 5)
-    max_pose = pc2.slider("Pose maxi par objet (min)", 60, 360, 180, 5)
-
-    def _load(fine):
-        st.session_state["custom_rows"] = pd.DataFrame(
-            [{"Objet": res.iloc[o]["Objet"], "Début": f"{t_loc[fs]:%H:%M}", "Fin": end_label(fe)}
-             for o, fs, fe in fine])
-        st.session_state["custom_ver"] += 1
-
-    bc1, bc2, bc3 = st.columns([2, 2, 2])
-    if bc1.button("⚙️ Proposer un enchaînement", disabled=not picked, width="stretch"):
-        if len(picked) > 8:
-            st.error("Pour l'optimisation, choisis 8 objets au maximum.")
-        else:
-            segs_c, dropped = optimize_selected(data, res, flt, picked, max(min_pose // STRIDE, 1),
-                                                max(max_pose // STRIDE, 2))
-            if not segs_c:
-                st.error("Impossible de placer ces objets avec ces durées : ils ne sont jamais "
-                         "dans ta zone assez longtemps. Réduis la pose mini ou change d'objets.")
-            else:
-                _load(refine_segments(data, res, segs_c, max_len=max_pose))
-                if dropped:
-                    st.warning("Pas la place pour : " + ", ".join(res.iloc[o]["Objet"] for o in dropped) + ".")
-                st.rerun()
-    base_plan = bc2.selectbox("Partir d'un plan existant", [f"Plan {pl['name']}" for pl in plans],
-                              label_visibility="collapsed", placeholder="Partir d'un plan existant…",
-                              index=None) if plans else None
-    if bc3.button("📥 Charger ce plan", disabled=base_plan is None, width="stretch"):
-        _load(next(pl["fine"] for pl in plans if f"Plan {pl['name']}" == base_plan))
-        st.rerun()
-
-    rows_df = st.session_state["custom_rows"].astype(str)
-    rows_df = rows_df[rows_df["Objet"].isin(names)].reset_index(drop=True)
-    st.caption("Crée ou modifie les lignes : objet, début et fin au format HH:MM (heure locale, fin exclue). "
-               "Le bouton « + » du tableau ajoute une ligne.")
-    edited = st.data_editor(
-        rows_df, num_rows="dynamic", hide_index=True, width="stretch",
-        key=f"custom_ed_{st.session_state['custom_ver']}",
-        column_config={"Objet": st.column_config.SelectboxColumn("Objet", options=names, required=True),
-                       "Début": st.column_config.TextColumn("Début (HH:MM)", required=True),
-                       "Fin": st.column_config.TextColumn("Fin (HH:MM)", required=True)})
-    st.session_state["custom_rows"] = edited.reset_index(drop=True)
-
-    if len(edited):
-        check, csegs = validate_custom(data, res, edited, lab2i)
-        st.dataframe(check, hide_index=True, width="stretch", column_config=col_config(check))
-        if csegs:
-            cdf = plan_table(data, res, csegs)
-            plan_dfs["Mon plan"] = cdf
-            st.markdown("**Mon plan** — " + " · ".join(f"{k_}: {v_}" for k_, v_ in summarize(cdf).items()
-                                                         if k_ != "Parcours"))
-            cshown = cdf.drop(columns=["_i", "_start", "_end"])
-            st.dataframe(cshown, hide_index=True, width="stretch", column_config=col_config(cshown))
-            st.plotly_chart(plan_chart(data, cdf), width="stretch", theme=None, key="chart_custom")
+# =========================== 🗓️ PLANS =======================================
+with tab_plans:
+    if plans:
+        if plans[0]["style"] != style:
+            st.warning(f"Aucun créneau possible en « {style} » : plans calculés en « {plans[0]['style']} ».")
+        for pl in plans:
+            sm = summarize(pl["df"])
+            st.markdown(f"**Plan {pl['name']}** · {sm['Objets']} objets · {sm['Pose totale']} de pose  \n"
+                        f"<small>{sm['Parcours']}</small>", unsafe_allow_html=True)
+        st.caption("Chaque plan utilise des objets différents. Un seul objet à la fois ; à chaque minute l'objet "
+                   "est dans ta zone (10 min entre deux objets pour le pointage). Barres pâles = fenêtre complète "
+                   "de visibilité ; Lune levée en jaune ; pointillés rouges = maintenant.")
     else:
-        st.info("Choisis des objets puis « Proposer un enchaînement », ou charge un plan existant.")
+        st.info("Aucun objet ne reste assez longtemps dans ta zone pour un plan automatique. "
+                "Tu peux quand même composer ton plan dans « Mon plan ».")
 
-# ----- Partage -----------------------------------------------------------------
-if plan_dfs:
-    st.subheader("📲 Partager un plan")
-    share_name = st.selectbox("Plan à partager", list(plan_dfs))
-    plan = plan_dfs[share_name]
-    zone = " ; ".join(f"az {a0:.0f}°→{a1:.0f}° · alt {lo:.0f}°–{hi:.0f}°" for a0, a1, lo, hi in intervals)
-    ctx = {"city": p["name"], "night": night, "t0": t_loc[0], "t1": t_loc[-1], "tz": _utc(t_loc[0]),
-           "illum": data["illum"] * 100, "zone": zone, "flt": flt,
-           "plan": "" if share_name == "Mon plan" and False else f" ({share_name})"}
-    text_emoji = build_message(plan, ctx, emoji=True)
-    text_plain = build_message(plan, ctx, emoji=False)  # le lien wa.me perd les emojis
+    subtabs = st.tabs([f"Plan {pl['name']}" for pl in plans] + ["✏️ Mon plan"])
+    for stab, pl in zip(subtabs, plans):
+        with stab:
+            show_plan(pl["df"], f"chart_{pl['name']}")
 
-    b1, b2 = st.columns(2)
-    b1.link_button("Ouvrir dans WhatsApp", "https://wa.me/?text=" + quote(text_plain), width="stretch")
-    b2.download_button("💾 Télécharger (.txt)", text_emoji,
-                       file_name=f"plan_nuit_{night:%Y%m%d}_{share_name.replace(' ', '_')}.txt", width="stretch")
-    st.code(text_emoji, language=None)  # bouton « copier » intégré
+    # ----- Mon plan (créé / ajusté à la main) --------------------------------
+    with subtabs[-1]:
+        st.markdown("Choisis des objets, laisse l'appli proposer un enchaînement, puis ajuste. "
+                    "Chaque créneau est contrôlé (zone dégagée, chevauchement, pointage).")
+        st.session_state.setdefault("custom_ver", 0)
+        st.session_state.setdefault("custom_rows", pd.DataFrame({c: pd.Series([], dtype=str)
+                                                                  for c in ("Objet", "Début", "Fin")}))
+        names = list(res["Objet"])
 
-    with st.expander("📤 Envoi direct à un contact (sans ouvrir WhatsApp)"):
-        provider = st.radio("Service d'envoi",
-                            ["CallMeBot (gratuit, le plus simple)", "WhatsApp Business Cloud API (Meta)"])
-        cloud = cfg.setdefault("cloud", {})
-        contacts = cfg.setdefault("contacts", [])
-        use_cmb = provider.startswith("CallMeBot")
-        if use_cmb:
-            st.caption("Chaque destinataire doit activer CallMeBot **depuis son propre WhatsApp** "
-                       "(procédure sur callmebot.com : on envoie « I allow callmebot to send me messages » "
-                       "au bot) et te communiquer la clé API reçue en retour.")
+        def _opt(i):
+            r = res.iloc[i]
+            mag = f"mag {r['Mag']:.1f}" if pd.notna(r["Mag"]) else "mag ?"
+            return f"{r['Objet']} {r['Nom']} · {mag} · visible {r['Visible']}".replace("  ", " ")
+
+        picked = st.multiselect("Objets que je veux observer", list(range(len(res))), format_func=_opt,
+                                key="custom_pick")
+        pc1, pc2 = st.columns(2)
+        min_pose = pc1.slider("Pose mini (min)", 20, 240, 60, 5)
+        max_pose = pc2.slider("Pose maxi (min)", 60, 360, 180, 5)
+
+        def _load(fine):
+            st.session_state["custom_rows"] = pd.DataFrame(
+                [{"Objet": res.iloc[o]["Objet"], "Début": f"{t_loc[fs]:%H:%M}", "Fin": end_label(fe)}
+                 for o, fs, fe in fine])
+            st.session_state["custom_ver"] += 1
+
+        if st.button("⚙️ Proposer un enchaînement", disabled=not picked, width="stretch"):
+            if len(picked) > 8:
+                st.error("Pour l'optimisation, choisis 8 objets au maximum.")
+            else:
+                segs_c, dropped = optimize_selected(data, res, flt, picked, max(min_pose // STRIDE, 1),
+                                                    max(max_pose // STRIDE, 2))
+                if not segs_c:
+                    st.error("Impossible de placer ces objets avec ces durées : ils ne sont jamais "
+                             "dans ta zone assez longtemps. Réduis la pose mini ou change d'objets.")
+                else:
+                    _load(refine_segments(data, res, segs_c, max_len=max_pose))
+                    if dropped:
+                        st.warning("Pas la place pour : " + ", ".join(res.iloc[o]["Objet"] for o in dropped) + ".")
+                    st.rerun()
+        if plans:
+            lc1, lc2 = st.columns([3, 2])
+            base_plan = lc1.selectbox("Partir d'un plan existant", [f"Plan {pl['name']}" for pl in plans],
+                                      index=None, placeholder="Partir d'un plan existant…",
+                                      label_visibility="collapsed")
+            if lc2.button("📥 Charger", disabled=base_plan is None, width="stretch"):
+                _load(next(pl["fine"] for pl in plans if f"Plan {pl['name']}" == base_plan))
+                st.rerun()
+
+        # -- ajout d'un créneau (formulaire adapté au tactile)
+        with st.expander("➕ Ajouter un créneau"):
+            obj_add = st.selectbox("Objet", names, key="add_obj")
+            oi = int(res.loc[res["Objet"] == obj_add, "idx"].iloc[0])
+            wins = ", ".join(f"{a:%H:%M}→{b:%H:%M}" for a, b in data["intervals"][oi])
+            st.caption(f"Fenêtre possible dans ta zone : {wins}")
+            with st.form("add_slot"):
+                f1, f2 = st.columns(2)
+                t_start = f1.time_input("Début", value=data["intervals"][oi][0][0].time(), step=60)
+                t_end = f2.time_input("Fin", value=data["intervals"][oi][0][1].time(), step=60)
+                if st.form_submit_button("Ajouter au plan", width="stretch"):
+                    rows_now = st.session_state["custom_rows"].astype(str)
+                    st.session_state["custom_rows"] = pd.concat(
+                        [rows_now, pd.DataFrame([{"Objet": obj_add, "Début": f"{t_start:%H:%M}",
+                                                  "Fin": f"{t_end:%H:%M}"}])], ignore_index=True)
+                    st.session_state["custom_ver"] += 1
+                    st.rerun()
+
+        rows_df = st.session_state["custom_rows"].astype(str)
+        rows_df = rows_df[rows_df["Objet"].isin(names)].reset_index(drop=True)
+        with st.expander("✏️ Modifier les créneaux dans un tableau", expanded=bool(len(rows_df))):
+            st.caption("Heures au format HH:MM (heure locale, fin exclue). La corbeille / le « + » du tableau "
+                       "suppriment ou ajoutent des lignes.")
+            edited = st.data_editor(
+                rows_df, num_rows="dynamic", hide_index=True, width="stretch",
+                key=f"custom_ed_{st.session_state['custom_ver']}",
+                column_config={"Objet": st.column_config.SelectboxColumn("Objet", options=names, required=True),
+                               "Début": st.column_config.TextColumn("Début", required=True),
+                               "Fin": st.column_config.TextColumn("Fin", required=True)})
+        st.session_state["custom_rows"] = edited.reset_index(drop=True)
+
+        if len(edited):
+            if st.button("🗑️ Tout effacer", width="stretch"):
+                st.session_state["custom_rows"] = rows_df.iloc[0:0]
+                st.session_state["custom_ver"] += 1
+                st.rerun()
+            check, csegs = validate_custom(data, res, edited, lab2i)
+            st.markdown("**Contrôle**")
+            for _, r in check.iterrows():
+                st.markdown(f"{r['Contrôle']}  \n<small>{r['Objet']} · {r['Créneau']} · {r['Durée']}</small>",
+                            unsafe_allow_html=True)
+            if csegs:
+                cdf = plan_table(data, res, csegs)
+                plan_dfs["Mon plan"] = cdf
+                st.markdown("**Mon plan** — " + " · ".join(f"{k_}: {v_}" for k_, v_ in summarize(cdf).items()
+                                                             if k_ != "Parcours"))
+                show_plan(cdf, "chart_custom")
         else:
-            st.caption("Nécessite un compte Meta for Developers avec un numéro WhatsApp Business. "
-                       "Le texte libre n'est accepté que si le contact a écrit à ton numéro Business "
-                       "dans les dernières 24 h (sinon Meta exige un modèle de message approuvé).")
-            cloud["token"] = st.text_input("Jeton d'accès", cloud.get("token", ""), type="password")
-            cloud["phone_id"] = st.text_input("ID du numéro WhatsApp (Phone number ID)", cloud.get("phone_id", ""))
-            cloud["version"] = st.text_input("Version de l'API (optionnel, ex. v23.0)", cloud.get("version", ""))
+            st.info("Choisis des objets puis « Proposer un enchaînement », ou charge un plan existant.")
 
-        with st.form("add_contact", clear_on_submit=True):
-            st.markdown("**Ajouter un contact**")
-            f1, f2, f3 = st.columns(3)
-            c_name = f1.text_input("Nom")
-            c_phone = f2.text_input("Numéro (+33612345678)")
-            c_key = f3.text_input("Clé API CallMeBot", type="password") if use_cmb else ""
-            if st.form_submit_button("Enregistrer le contact") and c_name and c_phone:
-                contacts.append({"name": c_name, "phone": c_phone.replace(" ", ""), "apikey": c_key})
-                save_cfg(cfg)
-                st.rerun()
-
-        if contacts:
-            who = st.selectbox("Destinataire", range(len(contacts)),
-                               format_func=lambda i: f"{contacts[i]['name']} ({contacts[i]['phone']})")
-            s1, s2 = st.columns(2)
-            if s1.button("🚀 Envoyer le plan", type="primary", width="stretch"):
-                c = contacts[who]
-                try:
-                    if use_cmb:
-                        if not c.get("apikey"):
-                            raise ValueError("Ce contact n'a pas de clé API CallMeBot.")
-                        ok_, msg = send_callmebot(c["phone"], c["apikey"], text_emoji)
-                    else:
-                        if not (cloud.get("token") and cloud.get("phone_id")):
-                            raise ValueError("Renseigne le jeton et l'ID du numéro.")
-                        save_cfg(cfg)
-                        ok_, msg = send_cloud_api(cloud["token"], cloud["phone_id"], c["phone"],
-                                                  text_emoji, cloud.get("version", ""))
-                    (st.success if ok_ else st.error)(f"{'Envoyé' if ok_ else 'Échec'} : {msg}")
-                except Exception as e:  # noqa: BLE001
-                    st.error(f"Échec : {e}")
-            if s2.button("🗑️ Supprimer ce contact", width="stretch"):
-                contacts.pop(who)
-                save_cfg(cfg)
-                st.rerun()
-        st.caption("⚠️ Les clés et jetons sont enregistrés en clair dans config.json, à côté de app.py.")
-
-
-# ----- Vue instantanée ------------------------------------------------------
-st.subheader("Ciel à l'instant choisi")
-slider_opts = list(range(0, T, 5))
-default_k = (min(slider_opts, key=lambda i: abs((t_loc[i] - now_site).total_seconds()))
-             if t_loc[0] <= now_site <= t_loc[-1] else slider_opts[len(slider_opts) // 2])
-k = st.select_slider("Heure (locale)", options=slider_opts, value=default_k,
-                     format_func=lambda i: f"{t_loc[i]:%H:%M}")
-left, right = st.columns([3, 2])
-with left:
-    st.plotly_chart(polar_chart(intervals, data, k), width="stretch", theme=None)
-with right:
+# =========================== 🌌 CIEL ========================================
+with tab_sky:
+    slider_opts = list(range(0, T, 5))
+    default_k = (min(slider_opts, key=lambda i: abs((t_loc[i] - now_site).total_seconds()))
+                 if t_loc[0] <= now_site <= t_loc[-1] else slider_opts[len(slider_opts) // 2])
+    k = st.select_slider("Heure (locale)", options=slider_opts, value=default_k,
+                         format_func=lambda i: f"{t_loc[i]:%H:%M}")
+    st.plotly_chart(polar_chart(intervals, data, k), width="stretch", theme=None, config=PLOT_CFG)
     now_ids = [i for i in res["idx"] if data["ok"][i, k]]
     st.markdown(f"**{len(now_ids)} objets dans ta zone à {t_loc[k]:%H:%M}**")
     now = data["sel"].loc[now_ids].copy()
@@ -1172,24 +1150,100 @@ with right:
     now["Az"] = data["az"][now_ids, k].round(1)
     now["Dir"] = [az_to_cardinal(a) for a in data["az"][now_ids, k]]
     now = now.sort_values("mag", na_position="last")
-    now = now[["label", "common", "type_fr", "mag", "size", "Alt", "Az", "Dir"]].rename(columns={
-        "label": "Objet", "common": "Nom", "type_fr": "Type", "mag": "Mag", "size": "Taille (')"})
-    st.dataframe(now, hide_index=True, width="stretch", height=440, column_config=col_config(now))
+    now = now[["label", "common", "mag", "Alt", "Az", "Dir"]].rename(columns={
+        "label": "Objet", "common": "Nom", "mag": "Mag"})
+    st.dataframe(now, hide_index=True, width="stretch", height=360, column_config=col_config(now))
 
-# ----- Tous les objets ------------------------------------------------------
-st.subheader("Tous les objets disponibles")
-sort_by = st.radio("Trier par", ["Durée visible", "Luminosité", "Taille"], horizontal=True)
-order = {"Durée visible": (["Durée (h)", "Mag"], [False, True]),
-         "Luminosité": (["Mag"], [True]), "Taille": (["Taille (')"], [False])}[sort_by]
-allres = res.sort_values(order[0], ascending=order[1], na_position="last")
-allshown = allres.drop(columns=["idx", "code"])
-st.dataframe(allshown, hide_index=True, width="stretch", column_config=col_config(allshown))
+# =========================== 📋 OBJETS ======================================
+with tab_obj:
+    sort_by = st.radio("Trier par", ["Heure de début", "Durée visible", "Luminosité", "Taille"], horizontal=True)
+    full_cols = st.checkbox("Toutes les colonnes", False)
+    order = {"Heure de début": (["_s", "Mag"], [True, True]),
+             "Durée visible": (["Durée (h)", "Mag"], [False, True]),
+             "Luminosité": (["Mag"], [True]), "Taille": (["Taille (')"], [False])}[sort_by]
+    allres = res.sort_values(order[0], ascending=order[1], na_position="last")
+    allshown = allres.drop(columns=["idx", "code", "_s", "_e"])
+    if not full_cols:
+        allshown = allshown[["Objet", "Nom", "Mag", "Visible", "Durée (h)", "Filtre", "Cadrage"]]
+    st.dataframe(allshown, hide_index=True, width="stretch", column_config=col_config(allshown))
+    chrono = res.sort_values(["_s", "_e"])  # ordre chronologique d'observation
+    st.markdown(f"**Tous les objets visibles ({len(chrono)}) sur toute la nuit, dans l'ordre d'observation** "
+                "— fond jaune : Lune levée · pointillés rouges : maintenant")
+    st.plotly_chart(timeline_chart(data, chrono["idx"].tolist()), width="stretch", theme=None, config=PLOT_CFG)
+    st.caption("Catalogue : OpenNGC (CC-BY-SA 4.0, M. Verga) · Éphémérides : astropy · "
+               "Caractéristiques instrument : Vaonis · Géocodage : Open-Meteo. "
+               "Les recommandations de filtre sont des règles empiriques.")
 
-top_ids = allres["idx"].head(20).tolist()
-if top_ids:
-    st.markdown("**Fenêtres de visibilité (20 premiers)** — fond jaune : Lune levée")
-    st.plotly_chart(timeline_chart(data, top_ids), width="stretch", theme=None)
+# =========================== 📲 PARTAGE =====================================
+with tab_share:
+    if not plan_dfs:
+        st.info("Aucun plan à partager pour l'instant.")
+    else:
+        share_name = st.selectbox("Plan à partager", list(plan_dfs))
+        plan = plan_dfs[share_name]
+        zone = " ; ".join(f"az {a0:.0f}°→{a1:.0f}° · alt {lo:.0f}°–{hi:.0f}°" for a0, a1, lo, hi in intervals)
+        ctx = {"city": p["name"], "night": night, "t0": t_loc[0], "t1": t_loc[-1], "tz": _utc(t_loc[0]),
+               "illum": data["illum"] * 100, "zone": zone, "flt": flt, "plan": f" ({share_name})"}
+        text_emoji = build_message(plan, ctx, emoji=True)
+        text_plain = build_message(plan, ctx, emoji=False)  # le lien wa.me perd les emojis
 
-st.caption("Catalogue : OpenNGC (CC-BY-SA 4.0, M. Verga) · Éphémérides : astropy · "
-           "Caractéristiques instrument : Vaonis · Géocodage : Open-Meteo. "
-           "Les recommandations de filtre sont des règles empiriques.")
+        st.link_button("📲 Envoyer via WhatsApp", "https://wa.me/?text=" + quote(text_plain),
+                       width="stretch", type="primary")
+        st.download_button("💾 Télécharger (.txt)", text_emoji, width="stretch",
+                           file_name=f"plan_nuit_{night:%Y%m%d}_{share_name.replace(' ', '_')}.txt")
+        st.caption("Sur téléphone, le bouton WhatsApp ouvre directement l'appli : tu choisis le contact.")
+        st.code(text_emoji, language=None)  # bouton « copier » intégré
+
+        with st.expander("📤 Envoi direct à un contact (sans ouvrir WhatsApp)"):
+            st.session_state.setdefault("contacts", [dict(c) for c in _secret("contacts", [])])
+            st.session_state.setdefault("cloud", dict(_secret("cloud", {})))
+            contacts, cloud = st.session_state["contacts"], st.session_state["cloud"]
+            provider = st.radio("Service d'envoi",
+                                ["CallMeBot (gratuit, le plus simple)", "WhatsApp Business Cloud API (Meta)"])
+            use_cmb = provider.startswith("CallMeBot")
+            if use_cmb:
+                st.caption("Chaque destinataire doit activer CallMeBot **depuis son propre WhatsApp** "
+                           "(procédure sur callmebot.com : on envoie « I allow callmebot to send me messages » "
+                           "au bot) et te communiquer la clé API reçue en retour.")
+            else:
+                st.caption("Nécessite un compte Meta for Developers avec un numéro WhatsApp Business. "
+                           "Le texte libre n'est accepté que si le contact a écrit à ton numéro Business "
+                           "dans les dernières 24 h (sinon Meta exige un modèle de message approuvé).")
+                cloud["token"] = st.text_input("Jeton d'accès", cloud.get("token", ""), type="password")
+                cloud["phone_id"] = st.text_input("ID du numéro WhatsApp (Phone number ID)",
+                                                  cloud.get("phone_id", ""))
+                cloud["version"] = st.text_input("Version de l'API (optionnel, ex. v23.0)",
+                                                 cloud.get("version", ""))
+
+            with st.form("add_contact", clear_on_submit=True):
+                st.markdown("**Ajouter un contact**")
+                c_name = st.text_input("Nom")
+                c_phone = st.text_input("Numéro (+33612345678)")
+                c_key = st.text_input("Clé API CallMeBot", type="password") if use_cmb else ""
+                if st.form_submit_button("Enregistrer le contact", width="stretch") and c_name and c_phone:
+                    contacts.append({"name": c_name, "phone": c_phone.replace(" ", ""), "apikey": c_key})
+                    st.rerun()
+
+            if contacts:
+                who = st.selectbox("Destinataire", range(len(contacts)),
+                                   format_func=lambda i: f"{contacts[i]['name']} ({contacts[i]['phone']})")
+                if st.button("🚀 Envoyer le plan", type="primary", width="stretch"):
+                    c = contacts[who]
+                    try:
+                        if use_cmb:
+                            if not c.get("apikey"):
+                                raise ValueError("Ce contact n'a pas de clé API CallMeBot.")
+                            ok_, msg = send_callmebot(c["phone"], c["apikey"], text_emoji)
+                        else:
+                            if not (cloud.get("token") and cloud.get("phone_id")):
+                                raise ValueError("Renseigne le jeton et l'ID du numéro.")
+                            ok_, msg = send_cloud_api(cloud["token"], cloud["phone_id"], c["phone"],
+                                                      text_emoji, cloud.get("version", ""))
+                        (st.success if ok_ else st.error)(f"{'Envoyé' if ok_ else 'Échec'} : {msg}")
+                    except Exception as e:  # noqa: BLE001
+                        st.error(f"Échec : {e}")
+                if st.button("🗑️ Supprimer ce contact", width="stretch"):
+                    contacts.pop(who)
+                    st.rerun()
+            st.caption("🔒 Contacts et clés ne sont gardés que le temps de ta session (rien n'est enregistré "
+                       "sur le serveur) : ils sont à ressaisir si tu recharges la page.")
