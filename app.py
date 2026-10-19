@@ -22,6 +22,7 @@ from astropy import units as u
 from astropy.coordinates import AltAz, EarthLocation, SkyCoord, get_body, get_sun
 from astropy.time import Time
 from astropy.utils import iers
+from streamlit import config
 from streamlit.runtime import exists as _streamlit_running
 
 # Permet de lancer simplement `python app.py` (ou le bouton Run de PyCharm) :
@@ -189,11 +190,12 @@ STRIDE = 5  # le calcul est à la minute ; l'enchaînement du plan se décide to
 
 
 def _tmpl() -> str:
-    """Thème des graphiques = thème du navigateur de chaque utilisateur (suit le mode sombre du téléphone)."""
-    try:
-        return "plotly_dark" if st.context.theme.type == "dark" else "plotly_white"
-    except Exception:
-        return "plotly_white"
+    """Thème des graphiques = thème choisi par le visiteur dans le menu Réglages."""
+    return "plotly_white" if st.session_state.get("theme_mode") == "Clair" else "plotly_dark"
+
+
+def _fc() -> str:
+    return "#0e1633" if st.session_state.get("theme_mode") == "Clair" else "#e6ecff"
 
 
 # Graphiques tactiles : pas de zoom/déplacement qui bloque le défilement de la page, pas de barre d'outils
@@ -351,23 +353,25 @@ def compute_night(lat, lon, elev, tz_name, night, sun_limit, intervals, mag_limi
 # --------------------------------------------------------------------------- #
 def _layout(fig, **kw):
     fig.update_layout(template=_tmpl(), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-                      dragmode=False, **kw)
-    fig.update_xaxes(fixedrange=True)
-    fig.update_yaxes(fixedrange=True)
+                      dragmode=False,
+                      font=dict(family="Inter, system-ui, -apple-system, sans-serif", size=12, color=_fc()),
+                      **kw)
+    fig.update_xaxes(fixedrange=True, gridcolor="rgba(150,160,185,0.14)", zeroline=False)
+    fig.update_yaxes(fixedrange=True, gridcolor="rgba(150,160,185,0.10)", zeroline=False)
     return fig
 
 
 def _moon_bands(fig, data):
     for a, b in runs(data["moon_alt"] > 0):
         fig.add_vrect(x0=_n(data["t_loc"][a]), x1=_n(data["t_loc"][b]),
-                      fillcolor="rgba(255,235,150,0.18)", line_width=0, layer="below")
+                      fillcolor="rgba(255,196,110,0.13)", line_width=0, layer="below")
 
 
 def _now_line(fig, data):
     now = datetime.now(data["t_loc"][0].tzinfo)
     if data["t_loc"][0] <= now <= data["t_loc"][-1]:
         fig.add_shape(type="line", x0=_n(now), x1=_n(now), y0=0, y1=1, yref="paper",
-                      line=dict(color="#e5534b", dash="dot", width=2))
+                      line=dict(color="#ffb86b", dash="dot", width=2))
 
 
 def polar_chart(intervals, data, k, top_n=25):
@@ -376,7 +380,7 @@ def polar_chart(intervals, data, k, top_n=25):
         span = az_span(a0, a1)
         fig.add_trace(go.Barpolar(
             r=[hi - lo], base=[90 - hi], theta=[(a0 + span / 2) % 360], width=[span],
-            marker=dict(color="rgba(46,160,67,0.28)", line=dict(color="rgba(46,160,67,0.6)", width=1)),
+            marker=dict(color="rgba(122,162,255,0.22)", line=dict(color="rgba(122,162,255,0.75)", width=1)),
             hoverinfo="skip", showlegend=False))
 
     res, sel = data["res"], data["sel"]
@@ -386,7 +390,7 @@ def polar_chart(intervals, data, k, top_n=25):
         sub = sel.loc[idxs].copy()
         sub["alt"], sub["az"] = data["alt"][idxs, k], data["az"][idxs, k]
         sub = sub.assign(rank=sub["mag"].fillna(99)).sort_values("rank")
-        colors = {"Nébuleuses": "#e5534b", "Galaxies": "#58a6ff", "Amas": "#e3b341"}
+        colors = {"Nébuleuses": "#ff7a90", "Galaxies": "#7aa2ff", "Amas": "#ffd166"}
         for cat, g in sub.groupby("category"):
             top = g.head(top_n)
             fig.add_trace(go.Scatterpolar(
@@ -403,10 +407,15 @@ def polar_chart(intervals, data, k, top_n=25):
                                       marker=dict(size=1, opacity=0)))
     return _layout(
         fig, height=440, margin=dict(l=24, r=24, t=10, b=10), legend=dict(orientation="h", y=-0.05),
-        polar=dict(angularaxis=dict(direction="clockwise", rotation=90, tickmode="array",
-                                    tickvals=[0, 90, 180, 270], ticktext=["N", "E", "S", "O"]),
+        polar=dict(bgcolor="rgba(0,0,0,0)",
+                   angularaxis=dict(direction="clockwise", rotation=90, tickmode="array",
+                                    tickvals=[0, 90, 180, 270], ticktext=["N", "E", "S", "O"],
+                                    gridcolor="rgba(140,155,205,.32)", linecolor="rgba(140,155,205,.5)",
+                                    tickfont=dict(color=_fc(), size=13)),
                    radialaxis=dict(range=[0, 90], tickvals=[0, 30, 60, 90],
-                                   ticktext=["90°", "60°", "30°", "0°"], angle=45)))
+                                   ticktext=["90°", "60°", "30°", "0°"], angle=45,
+                                   gridcolor="rgba(140,155,205,.32)", linecolor="rgba(140,155,205,.5)",
+                                   tickfont=dict(color=_fc(), size=10))))
 
 
 def timeline_chart(data, ids):
@@ -419,7 +428,7 @@ def timeline_chart(data, ids):
         for a, b in data["intervals"][i]:
             fig.add_trace(go.Bar(
                 base=[_n(a)], x=[(b - a + timedelta(minutes=1)).total_seconds() * 1000],
-                y=[label], orientation="h", marker_color="#58a6ff",
+                y=[label], orientation="h", marker_color="#7aa2ff",
                 hovertemplate=f"{label}<br>{a:%H:%M} → {b:%H:%M}<extra></extra>", showlegend=False))
     _now_line(fig, data)
     return _layout(fig, barmode="overlay", height=max(260, 22 * len(ids) + 80),
@@ -589,14 +598,14 @@ def plan_table(data, res, segs) -> pd.DataFrame:
 def plan_chart(data, plan: pd.DataFrame):
     fig = go.Figure()
     _moon_bands(fig, data)
-    palette = ["#58a6ff", "#e5534b", "#3fb950", "#e3b341", "#bc8cff", "#f0883e", "#39c5cf", "#db61a2"]
+    palette = ["#7aa2ff", "#b48cff", "#5eead4", "#ffb86b", "#ff7ab6", "#9be15d", "#67d4ff", "#ffd166"]
     order = []
     for n, r in plan.iterrows():
         label = f"{r['Objet']}"
         order.append(label)
         for a, b in data["intervals"][r["_i"]]:  # fenêtre complète de visibilité (fond pâle)
             fig.add_trace(go.Bar(base=[_n(a)], x=[(b - a + timedelta(minutes=1)).total_seconds() * 1000],
-                                 y=[label], orientation="h", marker_color="rgba(150,150,150,0.30)",
+                                 y=[label], orientation="h", marker_color="rgba(150,160,185,0.26)",
                                  hoverinfo="skip", showlegend=False))
         fig.add_trace(go.Bar(base=[_n(r["_start"])], x=[(r["_end"] - r["_start"]).total_seconds() * 1000],
                              y=[label], orientation="h", marker_color=palette[n % len(palette)],
@@ -799,20 +808,211 @@ def send_cloud_api(token: str, phone_id: str, to: str, text: str, version: str =
 # --------------------------------------------------------------------------- #
 # Interface (pensée pour le téléphone : onglets, boutons larges, cartes)
 # --------------------------------------------------------------------------- #
-st.markdown("""<style>
-.block-container{padding-top:3.5rem}
-[data-testid^="stBaseLinkButton"],.stButton button,.stDownloadButton button{min-height:46px}
-@media (max-width:640px){
-  .block-container{padding:3.2rem 0.6rem 3rem}
-  h1{font-size:1.45rem!important} h2{font-size:1.25rem!important} h3{font-size:1.1rem!important}
-  button[role="tab"]{padding:0.5rem 0.65rem}
-  [data-testid="stMetricValue"]{font-size:1.2rem}
-}
-</style>""", unsafe_allow_html=True)
+import html as _html
 
-st.markdown("### 🔭 Ciel visible")
+
+_STARS = ("radial-gradient(1px 1px at 12% 18%, rgba(255,255,255,.55), transparent),"
+          "radial-gradient(1px 1px at 38% 72%, rgba(255,255,255,.40), transparent),"
+          "radial-gradient(1.5px 1.5px at 66% 34%, rgba(255,255,255,.50), transparent),"
+          "radial-gradient(1px 1px at 83% 81%, rgba(255,255,255,.35), transparent),"
+          "radial-gradient(1px 1px at 92% 12%, rgba(255,255,255,.50), transparent),"
+          "radial-gradient(1px 1px at 24% 90%, rgba(255,255,255,.35), transparent),"
+          "radial-gradient(1.5px 1.5px at 51% 8%, rgba(255,255,255,.45), transparent)")
+
+
+def theme_css(light: bool = False) -> str:
+    """Deux palettes « argent & bleu nuit » (sombre / clair), indépendantes du thème Streamlit."""
+    if not light:
+        v = dict(panel="rgba(120,150,255,.07)", panel2="rgba(120,150,255,.13)", line="rgba(150,175,255,.17)",
+                 line2="rgba(170,190,255,.38)", field="rgba(120,150,255,.10)",
+                 text="#e6ecff", muted="#8e9bc4", accent="#7aa2ff", accent2="#9b8cff",
+                 side="rgba(9,15,38,.96)", strong="#ffffff", shadow="rgba(3,8,30,.40)", pop="#0f1936",
+                 codebg="rgba(5,9,24,.7)", flip="none",
+                 sheen="linear-gradient(145deg, rgba(255,255,255,.16) 0%, rgba(255,255,255,.03) 38%, rgba(255,255,255,.08) 100%)",
+                 hi="rgba(255,255,255,.30)", shine="rgba(255,255,255,.24)", glow="rgba(122,162,255,.55)",
+                 silver="linear-gradient(180deg,#ffffff 0%,#cdd6ef 48%,#8d9cc6 100%)",
+                 btn="linear-gradient(180deg,#ffffff 0%,#dde4f5 48%,#aab6d3 100%)", btn_fg="#0a1230",
+                 btn_edge="rgba(255,255,255,.55)",
+                 bg=("radial-gradient(1200px 560px at 82%% -10%%, rgba(70,110,255,.30), transparent 62%%),"
+                     "radial-gradient(900px 520px at -8%% 6%%, rgba(120,90,255,.18), transparent 58%%),"
+                     "radial-gradient(1000px 500px at 50%% 115%%, rgba(30,120,200,.16), transparent 60%%),"
+                     f"{_STARS}, linear-gradient(180deg, #0b1533 0%%, #070d24 55%%, #050a1c 100%%)"))
+    else:
+        v = dict(panel="rgba(255,255,255,.80)", panel2="#ffffff", line="rgba(30,50,110,.14)",
+                 line2="rgba(30,50,110,.34)", field="#ffffff",
+                 text="#0e1633", muted="#5a678a", accent="#3a62ee", accent2="#7a4df0",
+                 side="rgba(246,249,255,.97)", strong="#0a1230", shadow="rgba(40,70,160,.14)", pop="#ffffff",
+                 codebg="rgba(232,238,255,.9)", flip="invert(1) hue-rotate(180deg)",
+                 sheen="linear-gradient(145deg, rgba(255,255,255,.98) 0%, rgba(222,230,248,.60) 46%, rgba(255,255,255,.85) 100%)",
+                 hi="rgba(255,255,255,1)", shine="rgba(255,255,255,.85)", glow="rgba(58,98,238,.35)",
+                 silver="linear-gradient(180deg,#2b3a78 0%,#4b5c9e 50%,#7e8fc4 100%)",
+                 btn="linear-gradient(180deg,#ffffff 0%,#e1e8f7 46%,#b7c3df 100%)", btn_fg="#0a1230",
+                 btn_edge="rgba(30,50,110,.28)",
+                 bg=("radial-gradient(1100px 520px at 85%% -10%%, rgba(70,110,255,.16), transparent 60%%),"
+                     "radial-gradient(800px 480px at -5%% 0%%, rgba(150,110,255,.10), transparent 55%%),"
+                     "linear-gradient(180deg, #f5f8ff 0%%, #e8eefb 100%%)"))
+    v = {k: s.replace("%%", "%") for k, s in v.items()}  # (les %% ci-dessus sont des % littéraux)
+    css = """
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@200;300;400;500;600&display=swap');
+:root{--panel:%(panel)s;--panel2:%(panel2)s;--line:%(line)s;--line2:%(line2)s;--field:%(field)s;--text:%(text)s;
+      --muted:%(muted)s;--accent:%(accent)s;--accent2:%(accent2)s;--strong:%(strong)s;--shadow:%(shadow)s;
+      --sheen:%(sheen)s;--hi:%(hi)s;--shine:%(shine)s;--glow:%(glow)s;--silver:%(silver)s}
+.stApp{background:%(bg)s;background-attachment:fixed;color:var(--text)}
+.stApp,.stApp p,.stApp label,.stApp button,.stApp input,.stApp textarea,.stApp li,.stApp small,
+.stApp h1,.stApp h2,.stApp h3,.stApp h4{font-family:'Inter',system-ui,-apple-system,'Segoe UI',sans-serif}
+.stApp p,.stApp li,.stApp label,[data-testid="stWidgetLabel"] *,[data-testid="stMarkdownContainer"] *{color:var(--text)}
+[data-testid="stCaptionContainer"],[data-testid="stCaptionContainer"] *{color:var(--muted)!important}
+[data-testid="stHeader"]{background:transparent}
+[data-testid="stHeader"] *,[data-testid="stToolbar"] *{color:var(--text)}
+footer{visibility:hidden}
+.block-container{padding-top:3.5rem;max-width:1180px}
+[data-testid="stSidebar"]{background:%(side)s;border-right:1px solid var(--line);
+  box-shadow:inset -1px 0 0 var(--hi)}
+[data-testid="stSidebar"] .block-container{padding-top:2rem}
+hr{border-color:var(--line)!important}
+/* onglets */
+[data-baseweb="tab-list"]{gap:.2rem;border-bottom:1px solid var(--line)}
+button[role="tab"]{font-size:.76rem;letter-spacing:.16em;text-transform:uppercase;font-weight:500;
+  color:var(--muted)!important;padding:.85rem 1rem}
+button[role="tab"][aria-selected="true"],button[role="tab"][aria-selected="true"] *{color:var(--text)!important}
+[data-baseweb="tab-highlight"]{background:linear-gradient(90deg,var(--accent2),var(--accent),var(--accent2));
+  height:2px;box-shadow:0 0 12px var(--glow)}
+/* boutons : verre brillant, et bouton principal en argent brossé */
+.stButton>button,.stDownloadButton>button,[data-testid^="stBaseLinkButton"]{border-radius:999px;
+  border:1px solid var(--line2)!important;background:var(--sheen),var(--panel)!important;color:var(--text);
+  font-weight:500;letter-spacing:.03em;min-height:46px;transition:all .2s ease;
+  box-shadow:inset 0 1px 0 var(--hi),0 4px 14px var(--shadow)}
+.stButton>button:hover,.stDownloadButton>button:hover,[data-testid^="stBaseLinkButton"]:hover{
+  border-color:var(--accent)!important;box-shadow:inset 0 1px 0 var(--hi),0 0 16px var(--glow);color:var(--text)}
+[data-testid="stBaseButton-primary"],[data-testid="stBaseLinkButton-primary"]{background:%(btn)s!important;
+  color:%(btn_fg)s!important;border:1px solid %(btn_edge)s!important;
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.95),inset 0 -1px 0 rgba(0,0,0,.10),0 6px 18px var(--shadow)!important}
+[data-testid="stBaseButton-primary"] *,[data-testid="stBaseLinkButton-primary"] *{color:%(btn_fg)s!important}
+/* pastilles (directions, catégories) */
+[data-testid="stBaseButton-pills"],[data-testid="stBaseButton-pillsActive"]{border-radius:999px!important;
+  font-size:.8rem;min-height:34px;padding:.1rem .8rem;transition:all .15s ease}
+[data-testid="stBaseButton-pills"]{background:var(--field)!important;border:1px solid var(--line2)!important;
+  color:var(--muted)!important}
+[data-testid="stBaseButton-pills"] *{color:var(--muted)!important}
+[data-testid="stBaseButton-pillsActive"]{background:var(--sheen),rgba(122,162,255,.28)!important;
+  border:1px solid var(--accent)!important;color:var(--text)!important;box-shadow:0 0 12px var(--glow)}
+[data-testid="stBaseButton-pillsActive"] *{color:var(--text)!important}
+/* champs de saisie */
+[data-baseweb="input"],[data-baseweb="base-input"],[data-baseweb="textarea"],[data-baseweb="select"]>div{
+  background:var(--field)!important;border-color:var(--line2)!important;border-radius:12px!important}
+[data-baseweb="select"] div{background-color:transparent}
+[data-baseweb="select"]>div{background:var(--field)!important}
+[data-baseweb="input"] input,[data-baseweb="textarea"] textarea{background:transparent!important;
+  color:var(--text)!important;-webkit-text-fill-color:var(--text)}
+[data-baseweb="select"] *{color:var(--text)!important}
+[data-baseweb="select"] svg,[data-testid="stDateInput"] svg{fill:var(--muted)!important;color:var(--muted)!important}
+[data-testid="stNumberInputStepDown"],[data-testid="stNumberInputStepUp"]{background:var(--field)!important;
+  color:var(--text)!important}
+[data-baseweb="popover"] [data-baseweb="menu"],[data-baseweb="popover"] ul{background:%(pop)s!important}
+[data-baseweb="popover"] li,[data-baseweb="popover"] li *{color:var(--text)!important}
+/* boutons radio / cases à cocher : cercle et carré non sélectionnés */
+label[data-baseweb="radio"]:has(input:not(:checked))>div:first-child{background:var(--field)!important;
+  border-color:var(--line2)!important}
+label[data-baseweb="checkbox"]:has(input:not(:checked))>span:first-child{background:var(--field)!important;
+  border-color:var(--line2)!important}
+/* panneaux */
+[data-testid="stExpander"]{border:1px solid var(--line);border-radius:16px;
+  background:var(--sheen),var(--panel);box-shadow:inset 0 1px 0 var(--hi)}
+[data-testid="stExpander"] summary *{color:var(--text)!important}
+[data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:16px;overflow:hidden}
+[data-testid="stDataFrame"],[data-testid="stDataFrameResizable"]{filter:%(flip)s}
+[data-testid="stAlert"]{border-radius:16px}
+[data-testid="stAlert"] *{color:var(--text)!important}
+[data-testid="stCode"],pre{border-radius:16px;background:%(codebg)s!important}
+pre,code,[data-testid="stCode"] *{color:var(--text)!important}
+[data-testid="stSliderThumbValue"],[data-testid="stSliderThumbValue"] *,[data-testid="stTickBarMin"],
+[data-testid="stTickBarMax"]{color:var(--text)!important}
+[data-testid="stTable"] table,[data-testid="stTable"] td,[data-testid="stTable"] th{color:var(--text)!important;
+  border-color:var(--line)!important}
+/* composants maison */
+.hero{padding:.2rem 0 1rem}
+.eyebrow{font-size:.7rem;letter-spacing:.24em;text-transform:uppercase;color:var(--muted)!important;
+  font-weight:500;margin:.2rem 0 .6rem}
+.hero .title{font-weight:200;font-size:clamp(2.2rem,6vw,3.6rem);letter-spacing:-.025em;line-height:1.08;
+  margin:.1rem 0 .4rem;
+  background:linear-gradient(100deg,transparent 38%%,rgba(255,255,255,.95) 50%%,transparent 62%%) 200%% 0/250%% 100%% no-repeat,var(--silver);
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent;
+  animation:titleshine 7s ease-in-out infinite}
+@keyframes titleshine{0%%,55%%{background-position:200%% 0,0 0}100%%{background-position:-120%% 0,0 0}}
+.hero .lead{color:var(--muted);font-weight:300;font-size:1.02rem;max-width:42rem}
+.stats,.pgrid{display:grid;gap:.8rem;margin:.6rem 0 1rem}
+.stats{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
+.pgrid{grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
+.stat,.psum,.slot{position:relative;overflow:hidden;background:var(--sheen),var(--panel);
+  border:1px solid var(--line2);border-radius:20px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
+  box-shadow:inset 0 1px 0 var(--hi),0 10px 30px var(--shadow)}
+.stat::after,.psum::after,.slot::after{content:"";position:absolute;top:0;left:-70%%;width:45%%;height:100%%;
+  background:linear-gradient(100deg,transparent,var(--shine),transparent);transform:skewX(-20deg);
+  opacity:0;pointer-events:none}
+.stat:hover::after,.psum:hover::after,.slot:hover::after{animation:sweep 1.2s ease}
+@keyframes sweep{0%%{left:-70%%;opacity:.9}100%%{left:140%%;opacity:0}}
+.stat,.psum{padding:1rem 1.2rem}
+.stat .k,.psum .k{font-size:.66rem;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);font-weight:500}
+.stat .v,.psum .v{font-size:1.75rem;font-weight:200;line-height:1.25;letter-spacing:-.01em;
+  background:var(--silver);-webkit-background-clip:text;background-clip:text;
+  -webkit-text-fill-color:transparent;color:transparent}
+.stat .s,.psum .s{font-size:.8rem;color:var(--muted);font-weight:300;margin-top:.1rem}
+.slot{padding:1.1rem 1.3rem;margin:.7rem 0}
+.slot .top{display:flex;justify-content:space-between;align-items:baseline;gap:.6rem;flex-wrap:wrap}
+.slot .time{font-size:1.5rem;font-weight:200;letter-spacing:-.01em;background:var(--silver);
+  -webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent;color:transparent}
+.slot .dur{color:var(--muted);font-size:.85rem;font-weight:400}
+.slot .name{font-size:1.1rem;font-weight:500;margin-top:.35rem;color:var(--strong)}
+.slot .name small{color:var(--muted);font-weight:300;margin-left:.5rem;font-size:.85rem}
+.slot .sub{color:var(--muted);font-size:.86rem;font-weight:300}
+.nightbar{position:relative;height:4px;border-radius:4px;background:var(--line);margin:.9rem 0 .7rem}
+.nightbar i{position:absolute;top:0;bottom:0;border-radius:4px;
+  background:linear-gradient(90deg,var(--accent),#e9eeff 50%%,var(--accent2));box-shadow:0 0 10px var(--glow)}
+.chip{display:inline-block;padding:.18rem .7rem;border-radius:999px;border:1px solid var(--line2);
+  background:var(--sheen);font-size:.76rem;color:var(--muted);margin:.18rem .3rem .18rem 0;white-space:nowrap;
+  box-shadow:inset 0 1px 0 var(--hi)}
+.chip.hl{color:var(--accent);border-color:var(--accent);box-shadow:inset 0 1px 0 var(--hi),0 0 10px var(--glow)}
+@media (max-width:640px){
+  .block-container{padding:3.2rem .7rem 3rem}
+  .hero .title{font-size:2.3rem}
+  .stat .v,.psum .v{font-size:1.45rem}
+  .slot{padding:1rem}
+  .slot .time{font-size:1.3rem}
+}
+""" % v
+    return "<style>" + css + "</style>"
+
+
+# Thème Streamlit « bleu nuit » (identique pour tous les visiteurs) : appliqué au démarrage du serveur,
+# au besoin avec un unique rechargement. Le fichier .streamlit/config.toml fait la même chose.
+_THEME = {"theme.base": "dark", "theme.primaryColor": "#7aa2ff", "theme.backgroundColor": "#080e22",
+          "theme.secondaryBackgroundColor": "#0f1936", "theme.textColor": "#e6ecff"}
+_changed = False
+for _k, _v in _THEME.items():
+    if config.get_option(_k) != _v:
+        config.set_option(_k, _v)
+        _changed = True
+if _changed and not st.session_state.get("_themed"):
+    st.session_state["_themed"] = True
+    st.rerun()
+
+# Choix du thème (par visiteur) : en tête du menu Réglages ; mémorisé dans l'URL (?theme=light|dark)
+if "theme_mode" not in st.session_state:
+    st.session_state["theme_mode"] = "Clair" if st.query_params.get("theme") == "light" else "Sombre"
+with st.sidebar:
+    st.markdown('<div class="eyebrow">Réglages</div>', unsafe_allow_html=True)
+    st.radio("Thème", ["Sombre", "Clair"], horizontal=True, key="theme_mode")
+_want = "light" if st.session_state["theme_mode"] == "Clair" else "dark"
+if st.query_params.get("theme") != _want:
+    st.query_params["theme"] = _want
+
+st.markdown(theme_css(light=_want == "light"), unsafe_allow_html=True)
+st.markdown('<div class="hero"><div class="eyebrow">Vespera Pro 2 · Planificateur de nuit</div>'
+            '<div class="title">Ciel visible</div>'
+            '<div class="lead">Dessine ta zone de ciel dégagée et obtiens un plan de nuit séquencé : '
+            'quel objet, à quelle heure, dans quelle direction.</div></div>', unsafe_allow_html=True)
 header = st.container()  # rempli après le calcul (nuit, Lune, filtre)
-tab_sky, tab_obj, tab_plans, tab_share = st.tabs(["🌌 Ciel", "📋 Objets", "🗓️ Plans", "📲 Partage"])
+tab_sky, tab_obj, tab_plans, tab_share = st.tabs(["Ciel", "Objets", "Plans", "Partage"])
 
 
 def _secret(key, default):
@@ -824,8 +1024,7 @@ def _secret(key, default):
 
 # =========================== ⚙️ RÉGLAGES (menu de gauche) ===================
 with st.sidebar:
-    st.markdown("## ⚙️ Réglages")
-    st.markdown("**📍 Lieu & nuit**")
+    st.markdown('<div class="eyebrow">Lieu & nuit</div>', unsafe_allow_html=True)
     city = st.text_input("Ville", "Nanterre")
     try:
         places = geocode(city) if city.strip() else []
@@ -860,7 +1059,7 @@ with st.sidebar:
                                  help="Sert à la réfraction atmosphérique (quelques minutes d'arc à 20°).")
 
     st.divider()
-    st.markdown("**🧭 Ma zone de ciel dégagée**")
+    st.markdown('<div class="eyebrow">Ma zone de ciel</div>', unsafe_allow_html=True)
     dirs = st.pills("Directions visibles", SECTORS, selection_mode="multi", default=DEFAULT_DIRS) or []
     amin, amax = st.slider("Hauteur visible (°)", 0, 90, (20, 50),
                            help="Altitude minimale (arbres, immeubles) et maximale (balcon, toit…).")
@@ -885,7 +1084,7 @@ with st.sidebar:
                          if float(r[2]) < float(r[3])]
 
     st.divider()
-    st.markdown("**🔭 Objets**")
+    st.markdown('<div class="eyebrow">Objets</div>', unsafe_allow_html=True)
     cats = st.pills("Catégories", list(CATEGORIES), selection_mode="multi", default=["Nébuleuses"]) or []
     flt = st.radio("Filtre optique", FILTERS, index=2, horizontal=True,
                    help="Le Vespera n'a pas de changement de filtre en cours de nuit : "
@@ -899,7 +1098,7 @@ with st.sidebar:
         st.table(pd.Series(VESPERA, name="Valeur"))
 
     st.divider()
-    st.markdown("**🗓️ Plans**")
+    st.markdown('<div class="eyebrow">Plans</div>', unsafe_allow_html=True)
     style = st.radio("Durée par objet", list(PLAN_STYLES), index=0,
                      help="Poses longues : peu d'objets, beaucoup de temps de pose sur chacun.")
     n_plans = st.slider("Nombre de plans alternatifs", 1, 5, 3,
@@ -910,10 +1109,10 @@ with st.sidebar:
 
 # =========================== CALCULS ========================================
 if not cats:
-    st.info("Choisis au moins une catégorie d'objets dans ⚙️ Réglages.")
+    st.info("Choisis au moins une catégorie d'objets dans le menu Réglages (à gauche).")
     st.stop()
 if not intervals:
-    st.info("Choisis au moins une direction visible dans ⚙️ Réglages.")
+    st.info("Choisis au moins une direction visible dans le menu Réglages (à gauche).")
     st.stop()
 
 mask_key = tuple(tuple(float(x) for x in iv) for iv in intervals)
@@ -951,7 +1150,7 @@ if not res.empty:
     data["res"] = res
 if res.empty:
     st.info("Aucun objet ne traverse ta zone avec ces filtres. Élargis la zone, la magnitude ou change de filtre "
-            "dans ⚙️ Réglages.")
+            "dans le menu Réglages (à gauche).")
     st.stop()
 
 # Plans automatiques (mis en cache dans la session tant que les réglages ne changent pas)
@@ -978,20 +1177,39 @@ def summarize(plan_df):
 
 
 def plan_cards(plan_df):
-    """Un créneau = une carte compacte (lisible sans défilement horizontal)."""
+    """Un créneau = une carte : heure, objet, position dans la nuit, altitude / azimut."""
+    t0 = t_loc[0]
+    span = (t_loc[-1] + timedelta(minutes=1) - t0).total_seconds()
     for _, r in plan_df.iterrows():
+        left = (r["_start"] - t0).total_seconds() / span * 100
+        width = max((r["_end"] - r["_start"]).total_seconds() / span * 100, 1.5)
+        nom = f"<small>{_html.escape(r['Nom'])}</small>" if r["Nom"] else ""
         mag = f" · mag {r['Mag']:.1f}" if pd.notna(r["Mag"]) else ""
-        with st.container(border=True):
-            st.markdown(f"**{r['Créneau']}** · {r['Durée']}  \n**{r['Objet']}** {r['Nom']} — {r['Type']}{mag}")
-            st.caption(f"↗ alt {r['Altitude']} · az {r['Azimut']} ({r['Dir']})  \n"
-                       f"🌙 {r['Lune']} · {r['Filtre']} · cadrage {r['Cadrage']} · visible {r['Visible de']}")
+        hl = " hl" if "idéal" in r["Filtre"] else ""
+        st.markdown(
+            '<div class="slot">'
+            f'<div class="top"><span class="time">{r["Créneau"]}</span><span class="dur">{r["Durée"]}</span></div>'
+            f'<div class="name">{_html.escape(r["Objet"])}{nom}</div>'
+            f'<div class="sub">{_html.escape(r["Type"])}{mag}</div>'
+            f'<div class="nightbar"><i style="left:{left:.1f}%;width:{width:.1f}%"></i></div>'
+            f'<span class="chip">alt {r["Altitude"]}</span><span class="chip">az {r["Azimut"]}</span>'
+            f'<span class="chip">{r["Dir"]}</span><span class="chip">Lune {r["Lune"]}</span>'
+            f'<span class="chip{hl}">{_html.escape(r["Filtre"])}</span>'
+            f'<span class="chip">cadrage {_html.escape(r["Cadrage"])}</span>'
+            f'<span class="chip">visible {r["Visible de"]}</span></div>', unsafe_allow_html=True)
+
+
+def fmt_mag(df, col="Mag"):
+    df = df.copy()
+    df[col] = df[col].map(lambda x: "—" if pd.isna(x) else f"{x:.1f}")
+    return df
 
 
 def show_plan(plan_df, key):
     if view == "Cartes":
         plan_cards(plan_df)
     else:
-        shown = plan_df.drop(columns=["_i", "_start", "_end"])
+        shown = fmt_mag(plan_df.drop(columns=["_i", "_start", "_end"]))
         st.dataframe(shown, hide_index=True, width="stretch", column_config=col_config(shown))
     st.plotly_chart(plan_chart(data, plan_df), width="stretch", theme=None, config=PLOT_CFG, key=key)
 
@@ -1003,13 +1221,18 @@ for pl in plans:
     plan_dfs[f"Plan {pl['name']}"] = pl["df"]
 
 with header:
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Nuit", f"{t_loc[0]:%H:%M} → {t_loc[-1]:%H:%M}")
-    m2.metric("Lune", f"{data['illum'] * 100:.0f} %",
-              "levée une partie de la nuit" if (data["moon_alt"] > 0).any() else "couchée", delta_color="off")
-    m3.metric("Filtre", flt.split(" (")[0])
-    st.caption(f"📍 {p['name']} · 🕒 heure locale : {tz_label}, il est {now_site:%H:%M} sur place · "
-               "positions apparentes (réfraction incluse), calcul à la minute.")
+    moon_txt = "levée une partie de la nuit" if (data["moon_alt"] > 0).any() else "couchée"
+    st.markdown(
+        '<div class="stats">'
+        f'<div class="stat"><div class="k">Nuit</div><div class="v">{t_loc[0]:%H:%M} → {t_loc[-1]:%H:%M}</div>'
+        f'<div class="s">{_html.escape(p["name"])}</div></div>'
+        f'<div class="stat"><div class="k">Lune</div><div class="v">{data["illum"] * 100:.0f} %</div>'
+        f'<div class="s">{moon_txt}</div></div>'
+        f'<div class="stat"><div class="k">Filtre</div><div class="v">{_html.escape(flt.split(" (")[0])}</div>'
+        '<div class="s">Vespera Pro 2</div></div>'
+        f'<div class="stat"><div class="k">Heure locale</div><div class="v">{now_site:%H:%M}</div>'
+        f'<div class="s">{_utc(t_loc[0])} · {_html.escape(tz_name)}</div></div></div>', unsafe_allow_html=True)
+    st.caption("Heures locales du lieu · positions apparentes (réfraction incluse) · calcul à la minute.")
     if data["used_limit"] != sun_limit:
         st.warning(f"Pas de nuit {twilight.split(' ')[0].lower()} à cette date : "
                    f"j'utilise le Soleil à {data['used_limit']:.0f}° sous l'horizon.")
@@ -1020,10 +1243,11 @@ with tab_plans:
     if plans:
         if plans[0]["style"] != style:
             st.warning(f"Aucun créneau possible en « {style} » : plans calculés en « {plans[0]['style']} ».")
-        for pl in plans:
-            sm = summarize(pl["df"])
-            st.markdown(f"**Plan {pl['name']}** · {sm['Objets']} objets · {sm['Pose totale']} de pose  \n"
-                        f"<small>{sm['Parcours']}</small>", unsafe_allow_html=True)
+        cards = "".join(
+            f'<div class="psum"><div class="k">Plan {pl["name"]}</div><div class="v">{summarize(pl["df"])["Pose totale"]}</div>'
+            f'<div class="s">{summarize(pl["df"])["Objets"]} objets · {_html.escape(summarize(pl["df"])["Parcours"])}</div></div>'
+            for pl in plans)
+        st.markdown(f'<div class="pgrid">{cards}</div>', unsafe_allow_html=True)
         st.caption("Chaque plan utilise des objets différents. Un seul objet à la fois ; à chaque minute l'objet "
                    "est dans ta zone (10 min entre deux objets pour le pointage). Barres pâles = fenêtre complète "
                    "de visibilité ; Lune levée en jaune ; pointillés rouges = maintenant.")
@@ -1031,7 +1255,7 @@ with tab_plans:
         st.info("Aucun objet ne reste assez longtemps dans ta zone pour un plan automatique. "
                 "Tu peux quand même composer ton plan dans « Mon plan ».")
 
-    subtabs = st.tabs([f"Plan {pl['name']}" for pl in plans] + ["✏️ Mon plan"])
+    subtabs = st.tabs([f"Plan {pl['name']}" for pl in plans] + ["Mon plan"])
     for stab, pl in zip(subtabs, plans):
         with stab:
             show_plan(pl["df"], f"chart_{pl['name']}")
@@ -1062,7 +1286,7 @@ with tab_plans:
                  for o, fs, fe in fine])
             st.session_state["custom_ver"] += 1
 
-        if st.button("⚙️ Proposer un enchaînement", disabled=not picked, width="stretch"):
+        if st.button("Proposer un enchaînement", disabled=not picked, width="stretch"):
             if len(picked) > 8:
                 st.error("Pour l'optimisation, choisis 8 objets au maximum.")
             else:
@@ -1081,12 +1305,12 @@ with tab_plans:
             base_plan = lc1.selectbox("Partir d'un plan existant", [f"Plan {pl['name']}" for pl in plans],
                                       index=None, placeholder="Partir d'un plan existant…",
                                       label_visibility="collapsed")
-            if lc2.button("📥 Charger", disabled=base_plan is None, width="stretch"):
+            if lc2.button("Charger", disabled=base_plan is None, width="stretch"):
                 _load(next(pl["fine"] for pl in plans if f"Plan {pl['name']}" == base_plan))
                 st.rerun()
 
         # -- ajout d'un créneau (formulaire adapté au tactile)
-        with st.expander("➕ Ajouter un créneau"):
+        with st.expander("Ajouter un créneau"):
             obj_add = st.selectbox("Objet", names, key="add_obj")
             oi = int(res.loc[res["Objet"] == obj_add, "idx"].iloc[0])
             wins = ", ".join(f"{a:%H:%M}→{b:%H:%M}" for a, b in data["intervals"][oi])
@@ -1105,7 +1329,7 @@ with tab_plans:
 
         rows_df = st.session_state["custom_rows"].astype(str)
         rows_df = rows_df[rows_df["Objet"].isin(names)].reset_index(drop=True)
-        with st.expander("✏️ Modifier les créneaux dans un tableau", expanded=bool(len(rows_df))):
+        with st.expander("Modifier les créneaux dans un tableau", expanded=bool(len(rows_df))):
             st.caption("Heures au format HH:MM (heure locale, fin exclue). La corbeille / le « + » du tableau "
                        "suppriment ou ajoutent des lignes.")
             edited = st.data_editor(
@@ -1117,7 +1341,7 @@ with tab_plans:
         st.session_state["custom_rows"] = edited.reset_index(drop=True)
 
         if len(edited):
-            if st.button("🗑️ Tout effacer", width="stretch"):
+            if st.button("Tout effacer", width="stretch"):
                 st.session_state["custom_rows"] = rows_df.iloc[0:0]
                 st.session_state["custom_ver"] += 1
                 st.rerun()
@@ -1152,6 +1376,7 @@ with tab_sky:
     now = now.sort_values("mag", na_position="last")
     now = now[["label", "common", "mag", "Alt", "Az", "Dir"]].rename(columns={
         "label": "Objet", "common": "Nom", "mag": "Mag"})
+    now = fmt_mag(now)
     st.dataframe(now, hide_index=True, width="stretch", height=360, column_config=col_config(now))
 
 # =========================== 📋 OBJETS ======================================
@@ -1165,6 +1390,7 @@ with tab_obj:
     allshown = allres.drop(columns=["idx", "code", "_s", "_e"])
     if not full_cols:
         allshown = allshown[["Objet", "Nom", "Mag", "Visible", "Durée (h)", "Filtre", "Cadrage"]]
+    allshown = fmt_mag(allshown)
     st.dataframe(allshown, hide_index=True, width="stretch", column_config=col_config(allshown))
     chrono = res.sort_values(["_s", "_e"])  # ordre chronologique d'observation
     st.markdown(f"**Tous les objets visibles ({len(chrono)}) sur toute la nuit, dans l'ordre d'observation** "
@@ -1187,14 +1413,14 @@ with tab_share:
         text_emoji = build_message(plan, ctx, emoji=True)
         text_plain = build_message(plan, ctx, emoji=False)  # le lien wa.me perd les emojis
 
-        st.link_button("📲 Envoyer via WhatsApp", "https://wa.me/?text=" + quote(text_plain),
+        st.link_button("Envoyer via WhatsApp", "https://wa.me/?text=" + quote(text_plain),
                        width="stretch", type="primary")
-        st.download_button("💾 Télécharger (.txt)", text_emoji, width="stretch",
+        st.download_button("Télécharger (.txt)", text_emoji, width="stretch",
                            file_name=f"plan_nuit_{night:%Y%m%d}_{share_name.replace(' ', '_')}.txt")
         st.caption("Sur téléphone, le bouton WhatsApp ouvre directement l'appli : tu choisis le contact.")
         st.code(text_emoji, language=None)  # bouton « copier » intégré
 
-        with st.expander("📤 Envoi direct à un contact (sans ouvrir WhatsApp)"):
+        with st.expander("Envoi direct à un contact (sans ouvrir WhatsApp)"):
             st.session_state.setdefault("contacts", [dict(c) for c in _secret("contacts", [])])
             st.session_state.setdefault("cloud", dict(_secret("cloud", {})))
             contacts, cloud = st.session_state["contacts"], st.session_state["cloud"]
@@ -1227,7 +1453,7 @@ with tab_share:
             if contacts:
                 who = st.selectbox("Destinataire", range(len(contacts)),
                                    format_func=lambda i: f"{contacts[i]['name']} ({contacts[i]['phone']})")
-                if st.button("🚀 Envoyer le plan", type="primary", width="stretch"):
+                if st.button("Envoyer le plan", type="primary", width="stretch"):
                     c = contacts[who]
                     try:
                         if use_cmb:
@@ -1242,8 +1468,8 @@ with tab_share:
                         (st.success if ok_ else st.error)(f"{'Envoyé' if ok_ else 'Échec'} : {msg}")
                     except Exception as e:  # noqa: BLE001
                         st.error(f"Échec : {e}")
-                if st.button("🗑️ Supprimer ce contact", width="stretch"):
+                if st.button("Supprimer ce contact", width="stretch"):
                     contacts.pop(who)
                     st.rerun()
-            st.caption("🔒 Contacts et clés ne sont gardés que le temps de ta session (rien n'est enregistré "
+            st.caption("Contacts et clés ne sont gardés que le temps de ta session (rien n'est enregistré "
                        "sur le serveur) : ils sont à ressaisir si tu recharges la page.")
