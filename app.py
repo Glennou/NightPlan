@@ -6,6 +6,7 @@ Lancer :  python app.py   (ou : streamlit run app.py)
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from datetime import date, datetime, timedelta
@@ -76,18 +77,67 @@ TYPE_FR = {
 }
 
 FILTERS = ["Sans filtre", "CLS", "Dual band (Ha/OIII)"]
-EMISSION = {"HII", "EmN", "SNR", "Cl+N", "Neb", "PN"}
 WEEKDAYS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
 
 
-def filter_fit(code: str, flt: str) -> str:
-    """Règle empirique : adéquation d'un type d'objet avec le filtre optique."""
-    emission = code in EMISSION
-    if flt.startswith("Dual"):
-        return "★ idéal" if emission else "✖ déconseillé"
-    if flt == "CLS":
-        return "★ idéal" if emission else "✔ ok"
-    return "✔ ok" if emission else "★ idéal"  # sans filtre
+def ident(name) -> str:
+    """'NGC0224' → 'NGC 224', 'IC0434' → 'IC 434'."""
+    m = re.match(r"^(NGC|IC)0*(\d+)(.*)$", str(name))
+    return f"{m.group(1)} {m.group(2)}{m.group(3)}" if m else str(name)
+
+
+# --- Nature réelle des nébuleuses --------------------------------------------------------------
+# Le type du catalogue (HII, Neb, Cl+N…) ne distingue pas toujours une nébuleuse en ÉMISSION (Hα/OIII :
+# idéale en dual band) d'une nébuleuse par RÉFLEXION (lumière bleue d'étoiles : invisible en dual band).
+# Les cas connus sont donc corrigés ici, à la main.
+_REFLECTION = {  # réflexion (poussière éclairée par des étoiles) → déconseillées en dual band
+    "NGC 1432", "NGC 1435", "IC 349",                       # Pléiades (Maia, Mérope, Barnard)
+    "NGC 1333", "IC 348",                                   # Persée
+    "NGC 1973", "NGC 1975", "NGC 1977",                     # Running Man
+    "NGC 2068", "NGC 2071", "NGC 2023", "NGC 1788",         # M78 et alentours, Orion
+    "NGC 7023", "NGC 7129", "NGC 2170", "NGC 2182", "NGC 2183", "NGC 2245", "NGC 2247", "NGC 2261",
+    "NGC 1554", "NGC 1555", "IC 2118",                      # Hind, Hubble variable, Tête de sorcière
+    "IC 4592", "IC 4601", "IC 4603", "IC 4604",             # Scorpion / Rho Ophiuchi
+    "NGC 6726", "NGC 6727", "NGC 6729", "NGC 6589", "NGC 6590",
+    "IC 4605", "IC 447", "IC 444", "IC 1287", "IC 2220", "NGC 1909",
+}
+_MIXED = {"NGC 6514", "IC 5146", "IC 59", "IC 63", "NGC 6559", "NGC 1931"}  # émission + réflexion
+_EMISSION = {  # émission confirmée, mal typées dans le catalogue
+    "NGC 1499", "IC 405", "NGC 1976", "NGC 1982", "NGC 1893", "IC 410", "NGC 2174", "NGC 2175", "NGC 2264",
+    "NGC 2237", "NGC 2238", "NGC 2239", "NGC 2246", "IC 1396", "IC 1805", "IC 1848", "NGC 281", "NGC 896",
+    "NGC 7000", "IC 5070", "IC 5067", "NGC 6888", "NGC 7635", "NGC 6523", "NGC 6611", "NGC 6618",
+    "NGC 6334", "NGC 6357", "NGC 3372", "NGC 2359", "NGC 7380", "NGC 2024", "IC 434", "NGC 6820",
+    "NGC 6960", "NGC 6992", "NGC 6995", "NGC 6974", "NGC 2327", "IC 1795", "IC 1274",
+    "IC 4703", "IC 2944", "NGC 3324", "NGC 6188", "NGC 1763", "NGC 1858", "NGC 1910", "NGC 1948",
+    "NGC 2014", "NGC 2069", "NGC 2074",
+}
+_CLUSTER = {"NGC 1980", "NGC 1981", "NGC 6997", "NGC 6250"}  # amas avec un peu de nébulosité
+NATURE_FR = {"emission": "émission", "reflection": "réflexion", "mixed": "mixte", "planetary": "planétaire",
+             "snr": "rémanent", "galaxy": "galaxie", "cluster": "amas"}
+
+
+def nature(code: str, ident_: str) -> str:
+    if ident_ in _CLUSTER:
+        return "cluster"
+    if ident_ in _REFLECTION:
+        return "reflection"
+    if ident_ in _MIXED:
+        return "mixed"
+    if ident_ in _EMISSION:
+        return "emission"
+    return {"HII": "emission", "EmN": "emission", "PN": "planetary", "SNR": "snr", "RfN": "reflection",
+            "Neb": "mixed", "Cl+N": "mixed", "G": "galaxy", "GPair": "galaxy", "GTrpl": "galaxy",
+            "GGroup": "galaxy"}.get(code, "cluster")
+
+
+def filter_fit(nat: str, flt: str) -> str:
+    """Adéquation objet / filtre (règle empirique) d'après la *nature* de l'objet."""
+    if flt.startswith("Dual"):  # Hα + OIII uniquement
+        return {"emission": "★ idéal", "planetary": "★ idéal", "snr": "✔ ok",
+                "mixed": "✔ ok"}.get(nat, "✖ déconseillé")
+    if flt == "CLS":  # anti-pollution large bande
+        return {"reflection": "✔ ok", "galaxy": "✔ ok", "cluster": "✔ ok"}.get(nat, "★ idéal")
+    return {"reflection": "★ idéal", "galaxy": "★ idéal", "cluster": "★ idéal"}.get(nat, "✔ ok")  # sans filtre
 
 
 def framing(major_arcmin) -> str:
@@ -280,7 +330,7 @@ def runs(v: np.ndarray):
 
 @st.cache_data(show_spinner="Calcul de la nuit…")
 def compute_night(lat, lon, elev, tz_name, night, sun_limit, intervals, mag_limit,
-                  min_size, cats, famous_unrated, temp_c):
+                  min_size, cats, famous_unrated, temp_c, _v=0):
     tz = ZoneInfo(tz_name)
     times, used_limit, loc = find_dark_window(lat, lon, elev, tz, night, sun_limit)
     T = len(times)
@@ -332,7 +382,8 @@ def compute_night(lat, lon, elev, tz_name, night, sun_limit, intervals, mag_limi
         s, e = max(rr, key=lambda x: x[1] - x[0])
         best = np.where(v)[0][np.argmax(alt[i][v])]
         rows.append({
-            "idx": i, "Objet": r["label"], "Nom": r["common"], "Type": r["type_fr"], "code": r["Type"],
+            "idx": i, "Objet": r["label"], "Ident": ident(r["Name"]), "Nom": r["common"], "Type": r["type_fr"],
+            "code": r["Type"], "ra": r["ra"], "dec": r["dec"],
             "Const.": r["Const"], "Mag": r["mag"], "Taille (')": r["size"],
             "Visible": f"{t_loc[s]:%H:%M} → {t_loc[e]:%H:%M}", "_s": int(s), "_e": int(e),
             "Durée (h)": round((e - s + 1) / 60, 2),
@@ -809,6 +860,7 @@ def send_cloud_api(token: str, phone_id: str, to: str, text: str, version: str =
 # Interface (pensée pour le téléphone : onglets, boutons larges, cartes)
 # --------------------------------------------------------------------------- #
 import html as _html
+from urllib.parse import urlencode
 
 
 _STARS = ("radial-gradient(1px 1px at 12% 18%, rgba(255,255,255,.55), transparent),"
@@ -888,39 +940,41 @@ button[role="tab"][aria-selected="true"],button[role="tab"][aria-selected="true"
   color:%(btn_fg)s!important;border:1px solid %(btn_edge)s!important;
   box-shadow:inset 0 1px 0 rgba(255,255,255,.95),inset 0 -1px 0 rgba(0,0,0,.10),0 6px 18px var(--shadow)!important}
 [data-testid="stBaseButton-primary"] *,[data-testid="stBaseLinkButton-primary"] *{color:%(btn_fg)s!important}
-/* pastilles (directions, catégories) */
-[data-testid="stBaseButton-pills"],[data-testid="stBaseButton-pillsActive"]{border-radius:999px!important;
-  font-size:.8rem;min-height:34px;padding:.1rem .8rem;transition:all .15s ease}
-[data-testid="stBaseButton-pills"]{background:var(--field)!important;border:1px solid var(--line2)!important;
+/* pastilles (directions, catégories) : composants React Aria de Streamlit */
+button[data-variant="pills"],button[data-variant="pillsActive"]{border-radius:999px!important;font-size:.8rem;
+  min-height:34px;padding:.1rem .8rem;transition:all .15s ease}
+button[data-variant="pills"]{background:var(--field)!important;border:1px solid var(--line2)!important;
   color:var(--muted)!important}
-[data-testid="stBaseButton-pills"] *{color:var(--muted)!important}
-[data-testid="stBaseButton-pillsActive"]{background:var(--sheen),rgba(122,162,255,.28)!important;
+button[data-variant="pills"] *{color:var(--muted)!important}
+button[data-variant="pillsActive"]{background:var(--sheen),rgba(122,162,255,.28)!important;
   border:1px solid var(--accent)!important;color:var(--text)!important;box-shadow:0 0 12px var(--glow)}
-[data-testid="stBaseButton-pillsActive"] *{color:var(--text)!important}
+button[data-variant="pillsActive"] *{color:var(--text)!important}
 /* champs de saisie */
-[data-baseweb="input"],[data-baseweb="base-input"],[data-baseweb="textarea"],[data-baseweb="select"]>div{
-  background:var(--field)!important;border-color:var(--line2)!important;border-radius:12px!important}
-[data-baseweb="select"] div{background-color:transparent}
-[data-baseweb="select"]>div{background:var(--field)!important}
-[data-baseweb="input"] input,[data-baseweb="textarea"] textarea{background:transparent!important;
+[data-testid="stTextInputRootElement"],[data-testid="stNumberInputContainer"],[data-testid="stDateInputField"],
+[data-testid="stSelectbox"] div[role="group"],[data-testid="stMultiSelect"] div[role="group"],
+[data-testid="stTextArea"] textarea{background:var(--field)!important;border-color:var(--line2)!important;
+  border-radius:12px!important}
+[data-testid="stTextInputField"],[data-testid="stNumberInputField"],[data-testid="stSelectbox"] input,
+[data-testid="stMultiSelect"] input,[data-testid="stDateInput"] input{background:transparent!important;
   color:var(--text)!important;-webkit-text-fill-color:var(--text)}
-[data-baseweb="select"] *{color:var(--text)!important}
-[data-baseweb="select"] svg,[data-testid="stDateInput"] svg{fill:var(--muted)!important;color:var(--muted)!important}
+[data-testid="stDateInputField"] *{color:var(--text)!important}
+[data-testid="stSelectbox"] svg,[data-testid="stMultiSelect"] svg,[data-testid="stDateInput"] svg{
+  fill:var(--muted)!important;color:var(--muted)!important}
 [data-testid="stNumberInputStepDown"],[data-testid="stNumberInputStepUp"]{background:var(--field)!important;
   color:var(--text)!important}
-[data-baseweb="popover"] [data-baseweb="menu"],[data-baseweb="popover"] ul{background:%(pop)s!important}
-[data-baseweb="popover"] li,[data-baseweb="popover"] li *{color:var(--text)!important}
-/* boutons radio / cases à cocher : cercle et carré non sélectionnés */
-label[data-baseweb="radio"]:has(input:not(:checked))>div:first-child{background:var(--field)!important;
+[role="listbox"],[data-testid="stSelectboxVirtualDropdown"]{background:%(pop)s!important}
+[role="option"],[role="option"] *{color:var(--text)!important}
+/* boutons radio / cases à cocher non sélectionnés */
+label[data-testid="stRadioOption"]:not([data-selected="true"])>div>div:first-child{background:var(--field)!important;
   border-color:var(--line2)!important}
-label[data-baseweb="checkbox"]:has(input:not(:checked))>span:first-child{background:var(--field)!important;
+[data-testid="stCheckbox"] label:not([data-selected="true"])>div:first-of-type{background:var(--field)!important;
   border-color:var(--line2)!important}
 /* panneaux */
 [data-testid="stExpander"]{border:1px solid var(--line);border-radius:16px;
   background:var(--sheen),var(--panel);box-shadow:inset 0 1px 0 var(--hi)}
 [data-testid="stExpander"] summary *{color:var(--text)!important}
 [data-testid="stDataFrame"]{border:1px solid var(--line);border-radius:16px;overflow:hidden}
-[data-testid="stDataFrame"],[data-testid="stDataFrameResizable"]{filter:%(flip)s}
+[data-testid="stDataFrame"]{filter:%(flip)s}
 [data-testid="stAlert"]{border-radius:16px}
 [data-testid="stAlert"] *{color:var(--text)!important}
 [data-testid="stCode"],pre{border-radius:16px;background:%(codebg)s!important}
@@ -943,14 +997,14 @@ pre,code,[data-testid="stCode"] *{color:var(--text)!important}
 .stats,.pgrid{display:grid;gap:.8rem;margin:.6rem 0 1rem}
 .stats{grid-template-columns:repeat(auto-fit,minmax(170px,1fr))}
 .pgrid{grid-template-columns:repeat(auto-fit,minmax(250px,1fr))}
-.stat,.psum,.slot{position:relative;overflow:hidden;background:var(--sheen),var(--panel);
+.stat,.psum,.slot,.orow{position:relative;background:var(--sheen),var(--panel);
   border:1px solid var(--line2);border-radius:20px;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);
   box-shadow:inset 0 1px 0 var(--hi),0 10px 30px var(--shadow)}
-.stat::after,.psum::after,.slot::after{content:"";position:absolute;top:0;left:-70%%;width:45%%;height:100%%;
-  background:linear-gradient(100deg,transparent,var(--shine),transparent);transform:skewX(-20deg);
-  opacity:0;pointer-events:none}
+.stat::after,.psum::after,.slot::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+  opacity:0;background:linear-gradient(100deg,transparent 35%%,var(--shine) 50%%,transparent 65%%) -150%% 0/250%% 100%% no-repeat}
 .stat:hover::after,.psum:hover::after,.slot:hover::after{animation:sweep 1.2s ease}
-@keyframes sweep{0%%{left:-70%%;opacity:.9}100%%{left:140%%;opacity:0}}
+@keyframes sweep{0%%{background-position:-150%% 0;opacity:1}100%%{background-position:150%% 0;opacity:1}}
+.stat:hover,.psum:hover,.slot:hover,.orow:hover,.slot:focus-within,.orow:focus-within{z-index:30}
 .stat,.psum{padding:1rem 1.2rem}
 .stat .k,.psum .k{font-size:.66rem;letter-spacing:.2em;text-transform:uppercase;color:var(--muted);font-weight:500}
 .stat .v,.psum .v{font-size:1.75rem;font-weight:200;line-height:1.25;letter-spacing:-.01em;
@@ -972,12 +1026,33 @@ pre,code,[data-testid="stCode"] *{color:var(--text)!important}
   background:var(--sheen);font-size:.76rem;color:var(--muted);margin:.18rem .3rem .18rem 0;white-space:nowrap;
   box-shadow:inset 0 1px 0 var(--hi)}
 .chip.hl{color:var(--accent);border-color:var(--accent);box-shadow:inset 0 1px 0 var(--hi),0 0 10px var(--glow)}
+/* nom d'objet + vignette au survol / au toucher */
+.obj{position:relative;display:inline-block;cursor:help;border-bottom:1px dotted var(--accent);outline:none}
+.obj .pop{display:none;position:absolute;left:0;top:calc(100%% + 8px);z-index:9999;width:264px;padding:8px;
+  border-radius:16px;background:%(pop)s;border:1px solid var(--line2);box-shadow:0 16px 48px rgba(0,0,0,.45);
+  font-size:.8rem;font-weight:400;letter-spacing:0;text-transform:none;color:var(--text);line-height:1.3}
+.obj:hover .pop,.obj:focus .pop,.obj:focus-within .pop{display:block}
+.pop .imgwrap{position:relative;display:block;width:248px;height:248px;border-radius:10px;overflow:hidden;
+  background:#06091a}
+.pop .imgwrap::before{content:"Chargement…";position:absolute;inset:0;display:grid;place-items:center;
+  color:#8e9bc4;font-size:.8rem}
+.pop img{position:relative;width:100%%;height:100%%;object-fit:cover;display:block}
+.pop .fovbox{position:absolute;left:50%%;top:50%%;transform:translate(-50%%,-50%%);display:block;
+  border:1.5px dashed rgba(255,255,255,.9);box-shadow:0 0 0 1px rgba(0,0,0,.45)}
+.pop .cap{display:block;margin-top:6px;font-size:.72rem;color:var(--muted)}
+.orow{display:grid;grid-template-columns:minmax(170px,1fr) 2.4fr;gap:.2rem .9rem;align-items:start;
+  padding:.75rem 1rem;border:1px solid var(--line2);border-radius:16px;margin:.45rem 0;
+  box-shadow:inset 0 1px 0 var(--hi),0 6px 20px var(--shadow)}
+.orow .on{font-weight:500;color:var(--strong);font-size:1.02rem}
+.orow .on small{display:block;color:var(--muted);font-weight:300;font-size:.8rem}
+.orow .osub{color:var(--muted);font-size:.82rem;font-weight:300;margin-bottom:.15rem}
 @media (max-width:640px){
   .block-container{padding:3.2rem .7rem 3rem}
   .hero .title{font-size:2.3rem}
   .stat .v,.psum .v{font-size:1.45rem}
   .slot{padding:1rem}
   .slot .time{font-size:1.3rem}
+  .orow{grid-template-columns:1fr}
 }
 """ % v
     return "<style>" + css + "</style>"
@@ -1118,7 +1193,7 @@ if not intervals:
 mask_key = tuple(tuple(float(x) for x in iv) for iv in intervals)
 try:
     data = compute_night(lat, lon, elev, tz_name, night, sun_limit, mask_key,
-                         mag_limit, min_size, tuple(cats), unrated, float(temp_c))
+                         mag_limit, min_size, tuple(cats), unrated, float(temp_c), 4)
 except RuntimeError as e:
     st.error(str(e))
     st.stop()
@@ -1140,7 +1215,8 @@ tz_label = f"{tz_name} · {_utc(t_loc[0])} ({t_loc[0].tzname()})"
 
 res = data["res"].copy()
 if not res.empty:
-    res["Filtre"] = res["code"].map(lambda c: filter_fit(c, flt))
+    res["Nature"] = [nature(c, i) for c, i in zip(res["code"], res["Ident"])]
+    res["Filtre"] = res["Nature"].map(lambda n: filter_fit(n, flt))
     res["Cadrage"] = res["Taille (')"].map(framing)
     if hide_bad:
         res = res[res["Filtre"] != "✖ déconseillé"]
@@ -1176,6 +1252,37 @@ def summarize(plan_df):
             "Parcours": " → ".join(plan_df["Objet"])}
 
 
+HIPS_URL = "https://alasky.cds.unistra.fr/hips-image-services/hips2fits"
+
+
+def obj_html(i, label=None):
+    """Nom d'objet avec, au survol (ou au toucher), une vignette DSS2 centrée sur l'objet.
+    Le cadre pointillé montre le champ du Vespera Pro 2 quand l'objet est plus grand que lui."""
+    r = data["sel"].loc[i]
+    size = r["size"] if pd.notna(r["size"]) else 40.0
+    fov = float(np.clip(size * 2.4 / 60, 0.35, 6.0))
+    qs = urlencode({"hips": "CDS/P/DSS2/color", "width": 320, "height": 320, "projection": "TAN",
+                    "coordsys": "icrs", "ra": f"{r['ra']:.5f}", "dec": f"{r['dec']:.5f}",
+                    "fov": f"{fov:.3f}", "format": "jpg"})
+    box, cap = "", f"Champ {fov:.1f}°".replace(".", ",")
+    if fov > FOV_NATIVE[0] * 1.05:
+        w = FOV_NATIVE[0] / fov * 100
+        box = f'<i class="fovbox" style="width:{w:.1f}%;height:{w:.1f}%"></i>'
+        cap += f" · cadre = Vespera ({str(FOV_NATIVE[0]).replace('.', ',')}°)"
+    name = _html.escape(label or r["label"])
+    return (f'<span class="obj" tabindex="0">{name}<span class="pop"><span class="imgwrap">'
+            f'<img src="{HIPS_URL}?{qs}" loading="lazy" referrerpolicy="no-referrer" alt="{name}">{box}</span>'
+            f'<span class="cap">{cap} · DSS2 (CDS)</span></span></span>')
+
+
+def mag_txt(m):
+    return f"mag {m:.1f}" if pd.notna(m) else "mag ?"
+
+
+def obj_rows(rows_html):
+    st.markdown("".join(rows_html), unsafe_allow_html=True)
+
+
 def plan_cards(plan_df):
     """Un créneau = une carte : heure, objet, position dans la nuit, altitude / azimut."""
     t0 = t_loc[0]
@@ -1189,7 +1296,7 @@ def plan_cards(plan_df):
         st.markdown(
             '<div class="slot">'
             f'<div class="top"><span class="time">{r["Créneau"]}</span><span class="dur">{r["Durée"]}</span></div>'
-            f'<div class="name">{_html.escape(r["Objet"])}{nom}</div>'
+            f'<div class="name">{obj_html(r["_i"], r["Objet"])}{nom}</div>'
             f'<div class="sub">{_html.escape(r["Type"])}{mag}</div>'
             f'<div class="nightbar"><i style="left:{left:.1f}%;width:{width:.1f}%"></i></div>'
             f'<span class="chip">alt {r["Altitude"]}</span><span class="chip">az {r["Azimut"]}</span>'
@@ -1370,35 +1477,50 @@ with tab_sky:
     now_ids = [i for i in res["idx"] if data["ok"][i, k]]
     st.markdown(f"**{len(now_ids)} objets dans ta zone à {t_loc[k]:%H:%M}**")
     now = data["sel"].loc[now_ids].copy()
-    now["Alt"] = data["alt"][now_ids, k].round(1)
-    now["Az"] = data["az"][now_ids, k].round(1)
-    now["Dir"] = [az_to_cardinal(a) for a in data["az"][now_ids, k]]
+    now["alt"], now["az"] = data["alt"][now_ids, k], data["az"][now_ids, k]
     now = now.sort_values("mag", na_position="last")
-    now = now[["label", "common", "mag", "Alt", "Az", "Dir"]].rename(columns={
-        "label": "Objet", "common": "Nom", "mag": "Mag"})
-    now = fmt_mag(now)
-    st.dataframe(now, hide_index=True, width="stretch", height=360, column_config=col_config(now))
+    obj_rows([
+        '<div class="orow"><div class="on">' + obj_html(i) +
+        (f'<small>{_html.escape(r["common"])}</small>' if r["common"] else "") + '</div><div>'
+        f'<span class="chip">alt {r["alt"]:.1f}°</span><span class="chip">az {r["az"]:.1f}° ({az_to_cardinal(r["az"])})</span>'
+        f'<span class="chip">{mag_txt(r["mag"])}</span><span class="chip">{_html.escape(r["type_fr"])}</span></div></div>'
+        for i, r in now.iterrows()])
+    st.caption("Survole (ou touche) un nom pour voir à quoi ressemble l'objet · images DSS2 via CDS hips2fits.")
 
 # =========================== 📋 OBJETS ======================================
 with tab_obj:
     sort_by = st.radio("Trier par", ["Heure de début", "Durée visible", "Luminosité", "Taille"], horizontal=True)
-    full_cols = st.checkbox("Toutes les colonnes", False)
     order = {"Heure de début": (["_s", "Mag"], [True, True]),
              "Durée visible": (["Durée (h)", "Mag"], [False, True]),
              "Luminosité": (["Mag"], [True]), "Taille": (["Taille (')"], [False])}[sort_by]
     allres = res.sort_values(order[0], ascending=order[1], na_position="last")
-    allshown = allres.drop(columns=["idx", "code", "_s", "_e"])
-    if not full_cols:
-        allshown = allshown[["Objet", "Nom", "Mag", "Visible", "Durée (h)", "Filtre", "Cadrage"]]
-    allshown = fmt_mag(allshown)
-    st.dataframe(allshown, hide_index=True, width="stretch", column_config=col_config(allshown))
+
+    def objet_row(r):
+        nom = f'<small>{_html.escape(r["Nom"])}</small>' if r["Nom"] else ""
+        taille = r["Taille (')"]
+        taille_txt = f" · {taille:.0f}'" if pd.notna(taille) else ""
+        hl = " hl" if "idéal" in r["Filtre"] else ""
+        return ('<div class="orow"><div class="on">' + obj_html(r["idx"], r["Objet"]) + nom + '</div><div>'
+                f'<div class="osub">{_html.escape(r["Type"])} · {mag_txt(r["Mag"])}{taille_txt}</div>'
+                f'<span class="chip">{r["Visible"]}</span>'
+                f'<span class="chip">{fmt_dur(int(round(r["Durée (h)"] * 60)))}</span>'
+                f'<span class="chip{hl}">{_html.escape(r["Filtre"])}</span>'
+                f'<span class="chip">{NATURE_FR[r["Nature"]]}</span>'
+                f'<span class="chip">cadrage {_html.escape(r["Cadrage"])}</span></div></div>')
+
+    obj_rows([objet_row(r) for _, r in allres.iterrows()])
+    st.caption("Survole (ou touche) un nom pour voir à quoi ressemble l'objet · images DSS2 via CDS hips2fits.")
+    with st.expander("Tableau complet (triable, exportable)"):
+        allshown = fmt_mag(allres.drop(columns=["idx", "code", "_s", "_e", "Ident", "ra", "dec"]))
+        st.dataframe(allshown, hide_index=True, width="stretch", column_config=col_config(allshown))
     chrono = res.sort_values(["_s", "_e"])  # ordre chronologique d'observation
     st.markdown(f"**Tous les objets visibles ({len(chrono)}) sur toute la nuit, dans l'ordre d'observation** "
                 "— fond jaune : Lune levée · pointillés rouges : maintenant")
     st.plotly_chart(timeline_chart(data, chrono["idx"].tolist()), width="stretch", theme=None, config=PLOT_CFG)
     st.caption("Catalogue : OpenNGC (CC-BY-SA 4.0, M. Verga) · Éphémérides : astropy · "
                "Caractéristiques instrument : Vaonis · Géocodage : Open-Meteo. "
-               "Les recommandations de filtre sont des règles empiriques.")
+               "Images : DSS2 via hips2fits (CDS). Les recommandations de filtre sont des règles empiriques "
+               "(la nature émission / réflexion de certains objets est corrigée à la main).")
 
 # =========================== 📲 PARTAGE =====================================
 with tab_share:
